@@ -8,7 +8,8 @@ from typing import Tuple, List, Optional, Any, Dict
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
                              QPushButton, QSlider, QLabel, QSpinBox, QDoubleSpinBox,
                              QComboBox, QFileDialog, QMessageBox, QCheckBox, QDockWidget, QSizePolicy, QTableWidget,
-                             QTableWidgetItem, QDialog, QGridLayout, QTabWidget, QTextEdit, QAction, QFormLayout, QGroupBox, QScrollArea)
+                             QTableWidgetItem, QDialog, QGridLayout, QTabWidget, QTextEdit, QAction, QFormLayout,
+                             QListWidget, QGroupBox, QScrollArea)
 from PyQt5.QtCore import Qt, QSize
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
@@ -26,16 +27,117 @@ from scipy.ndimage import distance_transform_edt, center_of_mass, binary_dilatio
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtCore import pyqtSlot
 
-from data_generation import DataGenerator
+from data_generation import DataGenerator, DataManager
 from blob_detection import BlobAnalyzer
 from biological_simulation import BiologicalSimulator
 from file_operations import ImporterFactory
 #from volume_processor import VolumeProcessor
+from biological_simulation import EnhancedBiologicalSimulator, Cell, CellularEnvironment, ShapeSimulator, Sphere, Cube, RandomWalk, LinearMotion, Attraction, Repulsion
+from data_manager import DataManager
+from visualization_manager import VisualizationManager
+from biological_simulation_dialog import BiologicalSimulationDialog
+
+from ui_manager import UIManager
 
 import OpenGL
 print(f"PyQtGraph version: {pg.__version__}")
 print(f"OpenGL version: {OpenGL.__version__}")
 
+
+
+class EnhancedBiologicalSimulationWidget(QWidget):
+    simulationRequested = pyqtSignal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Create a scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll)
+
+        # Create a widget to hold all the controls
+        content_widget = QWidget()
+        scroll.setWidget(content_widget)
+        content_layout = QVBoxLayout(content_widget)
+
+        # Environment settings
+        env_group = QGroupBox("Environment Settings")
+        env_layout = QFormLayout()
+        self.env_size_x = QSpinBox()
+        self.env_size_y = QSpinBox()
+        self.env_size_z = QSpinBox()
+        for spinbox in [self.env_size_x, self.env_size_y, self.env_size_z]:
+            spinbox.setRange(10, 500)
+            spinbox.setValue(100)
+        env_layout.addRow("Environment Size X:", self.env_size_x)
+        env_layout.addRow("Environment Size Y:", self.env_size_y)
+        env_layout.addRow("Environment Size Z:", self.env_size_z)
+        env_group.setLayout(env_layout)
+        content_layout.addWidget(env_group)
+
+        # Cell settings
+        cell_group = QGroupBox("Cell Settings")
+        cell_layout = QFormLayout()
+        self.num_cells = QSpinBox()
+        self.num_cells.setRange(1, 20)
+        self.num_cells.setValue(1)
+        self.cell_type = QComboBox()
+        self.cell_type.addItems(['spherical', 'neuron', 'epithelial', 'muscle'])
+        cell_layout.addRow("Number of Cells:", self.num_cells)
+        cell_layout.addRow("Cell Type:", self.cell_type)
+        cell_group.setLayout(cell_layout)
+        content_layout.addWidget(cell_group)
+
+        # Protein dynamics
+        protein_group = QGroupBox("Protein Dynamics")
+        protein_layout = QFormLayout()
+        self.diffusion_checkbox = QCheckBox()
+        self.diffusion_coefficient = QDoubleSpinBox()
+        self.diffusion_coefficient.setRange(0, 100)
+        self.diffusion_coefficient.setValue(1)
+        protein_layout.addRow("Enable Diffusion:", self.diffusion_checkbox)
+        protein_layout.addRow("Diffusion Coefficient:", self.diffusion_coefficient)
+        protein_group.setLayout(protein_layout)
+        content_layout.addWidget(protein_group)
+
+        # Calcium signaling
+        calcium_group = QGroupBox("Calcium Signaling")
+        calcium_layout = QFormLayout()
+        self.calcium_signal_type = QComboBox()
+        self.calcium_signal_type.addItems(['None', 'Wave', 'Spark'])
+        self.calcium_amplitude = QDoubleSpinBox()
+        self.calcium_amplitude.setRange(0, 10)
+        self.calcium_amplitude.setValue(1)
+        calcium_layout.addRow("Signal Type:", self.calcium_signal_type)
+        calcium_layout.addRow("Amplitude:", self.calcium_amplitude)
+        calcium_group.setLayout(calcium_layout)
+        content_layout.addWidget(calcium_group)
+
+        # Simulation button
+        self.simulate_button = QPushButton("Run Simulation")
+        self.simulate_button.clicked.connect(self.requestSimulation)
+        layout.addWidget(self.simulate_button)
+
+    def requestSimulation(self):
+        params = {
+            'environment_size': (self.env_size_x.value(), self.env_size_y.value(), self.env_size_z.value()),
+            'num_cells': self.num_cells.value(),
+            'cell_type': self.cell_type.currentText(),
+            'protein_diffusion': {
+                'enabled': self.diffusion_checkbox.isChecked(),
+                'coefficient': self.diffusion_coefficient.value()
+            },
+            'calcium_signal': {
+                'type': self.calcium_signal_type.currentText(),
+                'amplitude': self.calcium_amplitude.value()
+            }
+        }
+        self.simulationRequested.emit(params)
 
 class BiologicalSimulationWidget(QWidget):
     simulationRequested = pyqtSignal(dict)
@@ -682,6 +784,268 @@ class TimeSeriesDialog(QDialog):
 
         self.setLayout(layout)
 
+
+class Visualizer3D:
+    def __init__(self, parent):
+        self.parent = parent
+        self.glView = None
+        self.blobGLView = None
+        self.data_items = []
+        self.blob_items = []
+        self.main_slice_marker_items = []
+        self.slice_marker_items = []
+
+    def create_3d_view(self):
+        self.glView = gl.GLViewWidget()
+        self.glView.setCameraPosition(distance=50, elevation=30, azimuth=45)
+        self.glView.opts['backgroundColor'] = pg.mkColor(20, 20, 20)  # Dark background
+
+        # Add a grid to the view
+        gx = gl.GLGridItem()
+        gx.rotate(90, 0, 1, 0)
+        self.glView.addItem(gx)
+        gy = gl.GLGridItem()
+        gy.rotate(90, 1, 0, 0)
+        self.glView.addItem(gy)
+        gz = gl.GLGridItem()
+        self.glView.addItem(gz)
+
+        self.glView.opts['fov'] = 60
+        self.glView.opts['elevation'] = 30
+        self.glView.opts['azimuth'] = 45
+
+        return self.glView
+
+    def create_blob_view(self):
+        self.blobGLView = gl.GLViewWidget()
+
+        # Add a grid to the view
+        gx = gl.GLGridItem()
+        gx.rotate(90, 0, 1, 0)
+        self.blobGLView.addItem(gx)
+        gy = gl.GLGridItem()
+        gy.rotate(90, 1, 0, 0)
+        self.blobGLView.addItem(gy)
+        gz = gl.GLGridItem()
+        self.blobGLView.addItem(gz)
+
+        return self.blobGLView
+
+    def clear_3d_visualization(self):
+        for item in self.data_items:
+            self.glView.removeItem(item)
+        self.data_items.clear()
+
+    def update_3d_visualization(self, data, time_point, threshold, render_mode):
+        self.clear_3d_visualization()
+
+        for c in range(data.shape[1]):
+            if self.parent.isChannelVisible(c):
+                try:
+                    self.visualize_channel(data, c, time_point, threshold, render_mode)
+                except Exception as e:
+                    self.parent.logger.error(f"Error visualizing channel {c}: {str(e)}")
+                    self.parent.logger.error(f"Traceback: {traceback.format_exc()}")
+
+        self.glView.update()
+
+    def visualize_channel(self, data, channel, time, threshold, render_mode):
+        volume_data = data[time, channel]
+        opacity = self.parent.getChannelOpacity(channel)
+        color = self.parent.getChannelColor(channel)
+        color = color[:3]  # Remove alpha if present
+
+        if render_mode == 'points':
+            self.render_points(volume_data, threshold, color, opacity)
+        else:
+            self.render_mesh(volume_data, threshold, color, opacity, render_mode)
+
+    def render_points(self, volume_data, threshold, color, opacity):
+        z, y, x = np.where(volume_data > threshold)
+        pos = np.column_stack((x, y, z))
+
+        if len(pos) > 0:
+            # Create colors array with 4 channels (RGBA)
+            colors = np.zeros((len(pos), 4))
+            colors[:, :3] = color  # Set RGB values
+
+            # Calculate alpha based on intensity
+            intensity = (volume_data[z, y, x] - volume_data.min()) / (volume_data.max() - volume_data.min())
+            colors[:, 3] = opacity * intensity  # Set alpha values
+
+            scatter = gl.GLScatterPlotItem(pos=pos, color=colors, size=self.parent.pointSizeSpinBox.value())
+            self.glView.addItem(scatter)
+            self.data_items.append(scatter)
+
+    def render_mesh(self, volume_data, threshold, color, opacity, render_mode):
+        verts, faces = self.parent.marchingCubes(volume_data, threshold)
+        if len(verts) > 0 and len(faces) > 0:
+            mesh = gl.GLMeshItem(vertexes=verts, faces=faces, smooth=True, drawEdges=render_mode=='wireframe')
+            mesh.setColor(color + (opacity,))
+
+            if render_mode == 'wireframe':
+                mesh.setColor(color + (opacity*0.1,))
+                mesh = gl.GLMeshItem(vertexes=verts, faces=faces, smooth=True, drawEdges=True,
+                                     edgeColor=color + (opacity,))
+
+            self.glView.addItem(mesh)
+            self.data_items.append(mesh)
+
+
+    def clear_slice_markers(self):
+        for item in self.slice_marker_items:
+            try:
+                self.blobGLView.removeItem(item)
+            except:
+                pass
+
+        for item in self.main_slice_marker_items:
+            try:
+                self.glView.removeItem(item)
+            except:
+                pass
+
+        self.slice_marker_items.clear()
+        self.main_slice_marker_items.clear()
+
+    def create_slice_markers(self, x_slice, y_slice, z_slice, width, height, depth):
+        x_marker = gl.GLLinePlotItem(pos=np.array([[x_slice, 0, 0], [x_slice, height, 0], [x_slice, height, depth], [x_slice, 0, depth]]),
+                                     color=(1, 0, 0, 1), width=2, mode='line_strip')
+        y_marker = gl.GLLinePlotItem(pos=np.array([[0, y_slice, 0], [width, y_slice, 0], [width, y_slice, depth], [0, y_slice, depth]]),
+                                     color=(0, 1, 0, 1), width=2, mode='line_strip')
+        z_marker = gl.GLLinePlotItem(pos=np.array([[0, 0, z_slice], [width, 0, z_slice], [width, height, z_slice], [0, height, z_slice]]),
+                                     color=(0, 0, 1, 1), width=2, mode='line_strip')
+
+        self.glView.addItem(x_marker)
+        self.glView.addItem(y_marker)
+        self.glView.addItem(z_marker)
+
+        x_marker_vis = gl.GLLinePlotItem(pos=np.array([[x_slice, 0, 0], [x_slice, height, 0], [x_slice, height, depth], [x_slice, 0, depth]]),
+                                         color=(1, 0, 0, 1), width=2, mode='line_strip')
+        y_marker_vis = gl.GLLinePlotItem(pos=np.array([[0, y_slice, 0], [width, y_slice, 0], [width, y_slice, depth], [0, y_slice, depth]]),
+                                         color=(0, 1, 0, 1), width=2, mode='line_strip')
+        z_marker_vis = gl.GLLinePlotItem(pos=np.array([[0, 0, z_slice], [width, 0, z_slice], [width, height, z_slice], [0, height, z_slice]]),
+                                         color=(0, 0, 1, 1), width=2, mode='line_strip')
+
+        self.blobGLView.addItem(x_marker_vis)
+        self.blobGLView.addItem(y_marker_vis)
+        self.blobGLView.addItem(z_marker_vis)
+
+        self.slice_marker_items.extend([x_marker_vis, y_marker_vis, z_marker_vis])
+        self.main_slice_marker_items.extend([x_marker, y_marker, z_marker])
+
+        # Add other visualization methods here...
+
+class ShapeSimulationDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Shape Simulation Setup")
+        self.layout = QVBoxLayout(self)
+
+        self.shape_list = QListWidget()
+        self.layout.addWidget(self.shape_list)
+
+        self.add_shape_button = QPushButton("Add Shape")
+        self.add_shape_button.clicked.connect(self.add_shape)
+        self.layout.addWidget(self.add_shape_button)
+
+        self.resolution = QSpinBox()
+        self.resolution.setRange(5, 50)
+        self.resolution.setValue(10)
+        self.layout.addWidget(QLabel("Resolution:"))
+        self.layout.addWidget(self.resolution)
+
+        self.interaction_combo = QComboBox()
+        self.interaction_combo.addItems(["None", "Attraction", "Repulsion"])
+        self.layout.addWidget(self.interaction_combo)
+
+        self.num_steps = QSpinBox()
+        self.num_steps.setRange(1, 1000)
+        self.num_steps.setValue(100)
+        self.layout.addWidget(QLabel("Number of steps:"))
+        self.layout.addWidget(self.num_steps)
+
+        self.dt = QDoubleSpinBox()
+        self.dt.setRange(0.01, 1.0)
+        self.dt.setValue(0.1)
+        self.layout.addWidget(QLabel("Time step (dt):"))
+        self.layout.addWidget(self.dt)
+
+        self.run_button = QPushButton("Run Simulation")
+        self.run_button.clicked.connect(self.accept)
+        self.layout.addWidget(self.run_button)
+
+    def add_shape(self):
+        dialog = ShapeDialog(self)
+        if dialog.exec_():
+            self.shape_list.addItem(str(dialog.get_shape_params()))
+
+    def get_params(self):
+        shapes = [eval(self.shape_list.item(i).text()) for i in range(self.shape_list.count())]
+        return {
+            'shapes': shapes,
+            'interactions': [{'type': self.interaction_combo.currentText().lower()}],
+            'num_steps': self.num_steps.value(),
+            'dt': self.dt.value(),
+            'resolution': self.resolution.value()
+        }
+
+class ShapeDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Shape")
+        self.layout = QFormLayout(self)
+
+        self.shape_type = QComboBox()
+        self.shape_type.addItems(["Sphere", "Cube"])
+        self.layout.addRow("Shape Type:", self.shape_type)
+
+        self.position = [QDoubleSpinBox() for _ in range(3)]
+        for pos in self.position:
+            pos.setRange(-50, 50)
+            pos.setDecimals(2)  # Allow for decimal places
+        self.layout.addRow("Position:", self.create_widget_group(self.position))
+
+
+        self.size = QSpinBox()
+        self.size.setRange(1, 20)
+        self.layout.addRow("Size:", self.size)
+
+        self.color = [QSpinBox() for _ in range(3)]
+        for c in self.color:
+            c.setRange(0, 255)
+        self.layout.addRow("Color (RGB):", self.create_widget_group(self.color))
+
+        self.movement = QComboBox()
+        self.movement.addItems(["Random", "Linear"])
+        self.layout.addRow("Movement:", self.movement)
+
+        self.speed = QDoubleSpinBox()
+        self.speed.setRange(0, 10)
+        self.layout.addRow("Speed:", self.speed)
+
+        self.accept_button = QPushButton("Add")
+        self.accept_button.clicked.connect(self.accept)
+        self.layout.addRow(self.accept_button)
+
+    def create_widget_group(self, widgets):
+        group = QWidget()
+        layout = QHBoxLayout(group)
+        for widget in widgets:
+            layout.addWidget(widget)
+        return group
+
+    def get_shape_params(self):
+        return {
+            'type': self.shape_type.currentText().lower(),
+            'position': [pos.value() for pos in self.position],
+            'size': self.size.value(),
+            'color': [c.value() for c in self.color],
+            'movement': self.movement.currentText().lower(),
+            'speed': self.speed.value(),
+            'velocity': [self.speed.value(), 0, 0] if self.movement.currentText().lower() == 'linear' else None
+        }
+
 ######################################################################################################
 ######################################################################################################
 '''                                   MAIN LIGHTSHEETVIEWER CLASS                                  '''
@@ -692,13 +1056,22 @@ class LightsheetViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.initLogging()
+        self.initColors()
+        self.data_manager = DataManager()
+        self.data_manager.set_generator('blob')  # Set the default generator type
+        self.visualization_manager = VisualizationManager(self)
+        self.visualization_manager.channel_colors = self.channel_colors
+        self.ui_manager = UIManager(self)
         self.volume_processor = VolumeProcessor()
         self.data = None
         self.lastPos = None
-        self.initDataGenerator()
+        self.data_manager = DataManager()
         self.initSimulator()
-        self.initColors()
-        self.setupChannelControlsWidget()
+
+
+        # Initialize the Visualizer3D
+        self.visualizer = Visualizer3D(self)
+
         self.initUI()
         self.generateData()
         self.initTimer()
@@ -707,20 +1080,27 @@ class LightsheetViewer(QMainWindow):
         self.biological_simulation_window = None
         self.toggleDownsamplingControls()  # Set initial state of downsampling controls
 
+        # Initialize empty lists for items that are now managed by Visualizer3D
+        self.data_items = []
+        self.blob_items = []
+        self.main_slice_marker_items = []
+        self.slice_marker_items = []
+
 
     def initColors(self):
         self.channel_colors = [
-            (1, 0, 0, 1),    # Red
-            (0, 1, 0, 1),    # Green
-            (0, 0, 1, 1),    # Blue
-            (1, 1, 0, 1),    # Yellow
-            (1, 0, 1, 1),    # Magenta
-            (0, 1, 1, 1),    # Cyan
-            (0.5, 0.5, 0.5, 1),  # Gray
-            (1, 0.5, 0, 1),  # Orange
-            (0.5, 0, 0.5, 1),    # Purple
-            (0, 0.5, 0.5, 1),    # Teal
+            QColor(255, 0, 0),    # Red
+            QColor(0, 255, 0),    # Green
+            QColor(0, 0, 255),    # Blue
+            QColor(255, 255, 0),  # Yellow
+            QColor(255, 0, 255),  # Magenta
+            QColor(0, 255, 255),  # Cyan
+            QColor(128, 128, 128),  # Gray
+            QColor(255, 128, 0),  # Orange
+            QColor(128, 0, 128),  # Purple
+            QColor(0, 128, 128),  # Teal
         ]
+
 
     def initLogging(self):
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -735,21 +1115,13 @@ class LightsheetViewer(QMainWindow):
         self.setGeometry(100, 100, 1600, 900)
         self.setCentralWidget(None)
 
-        self.createDocks()
+        self.ui_manager.setup_ui()
         self.organizeDocks()
         self.createMenuBar()
 
         self.connectViewEvents()
         self.check_view_state()
 
-    def createDocks(self):
-        self.createViewDocks()
-        self.createDataGenerationDock()
-        self.create3DVisualizationDock()
-        self.createVisualizationControlDock()
-        self.createPlaybackControlDock()
-        self.createBlobVisualizationDock()
-        self.createBlobDetectionDock()
 
     def organizeDocks(self):
         self.setDockOptions(QMainWindow.AllowNestedDocks | QMainWindow.AllowTabbedDocks)
@@ -763,13 +1135,15 @@ class LightsheetViewer(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock3D)
 
         # Add control docks to the far right
+        self.addDockWidget(Qt.RightDockWidgetArea, self.ui_manager.dockChannelControls)  # Add this line
         self.addDockWidget(Qt.RightDockWidgetArea, self.dockDataGeneration)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dockVisualizationControl)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dockPlaybackControl)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dockBlobDetection)
 
         # Set the 3D view and control docks side by side
-        self.splitDockWidget(self.dock3D, self.dockDataGeneration, Qt.Horizontal)
+        self.splitDockWidget(self.dock3D, self.ui_manager.dockChannelControls, Qt.Horizontal)  # Modified this line
+        self.tabifyDockWidget(self.ui_manager.dockChannelControls, self.dockDataGeneration)  # Modified this line
         self.tabifyDockWidget(self.dockDataGeneration, self.dockVisualizationControl)
         self.tabifyDockWidget(self.dockVisualizationControl, self.dockPlaybackControl)
         self.tabifyDockWidget(self.dockPlaybackControl, self.dockBlobDetection)
@@ -779,32 +1153,31 @@ class LightsheetViewer(QMainWindow):
 
         # Adjust dock sizes
         self.resizeDocks([self.dockXY, self.dockXZ, self.dockYZ], [200, 200, 200], Qt.Vertical)
-        self.resizeDocks([self.dock3D, self.dockDataGeneration], [800, 300], Qt.Horizontal)
+        self.resizeDocks([self.dock3D, self.ui_manager.dockChannelControls], [800, 300], Qt.Horizontal)  # Modified this line
+
 
     def initSimulator(self):
         self.biological_simulator = BiologicalSimulator(size=(30, 100, 100), num_time_points=10)
+        #TODO! Add the enhanced biological Simulator as an alternative option for simulating multiple cells and cell interactions
+        self.enhanced_biological_simulator = None
+        self.current_simulation_type = 'original'
 
     def initDataGenerator(self):
         self.data_generator = DataGenerator()
 
 
-    def runBiologicalSimulation(self, params):
-        try:
-            self.data = None  # Reset data at the start of simulation
-            soma_center = tuple(s // 2 for s in self.biological_simulator.size)
-            cell_type = params['cell_type']
-            cell_shape, cell_interior, cell_membrane = self.generateCellShape(params, soma_center, cell_type)
-
-            self.generateCellularStructures(params, cell_shape, cell_interior, cell_membrane, soma_center)
-            self.simulateProteinDynamics(params)
-            self.simulateCalciumSignal(params)
-
-            self.updateUIForNewData()
-            self.updateViews()
-            self.create3DVisualization()
-
-        except Exception as e:
-            self.handleSimulationError(e)
+    def runBiologicalSimulation(self):
+        dialog = BiologicalSimulationDialog(self)
+        if dialog.exec_():
+            params = dialog.get_parameters()
+            self.data_manager.set_generator('biological')
+            try:
+                self.data = self.data_manager.generate_data(params)
+                self.updateUIForNewData()
+                self.updateViews()
+                self.create3DVisualization()
+            except Exception as e:
+                QMessageBox.critical(self, "Simulation Error", str(e))
 
     def generateCellShape(self, params, soma_center, cell_type):
         if cell_type == 'neuron':
@@ -932,67 +1305,17 @@ class LightsheetViewer(QMainWindow):
         self.logger.error(f"Full exception: {traceback.format_exc()}")
         QMessageBox.critical(self, "Simulation Error", f"An error occurred during simulation: {str(e)}")
 
-    def createViewDocks(self):
-        # XY View
-        self.dockXY = QDockWidget("XY View", self)
-        self.imageViewXY = pg.ImageView()
-        self.imageViewXY.ui.roiBtn.hide()
-        self.imageViewXY.ui.menuBtn.hide()
-        self.imageViewXY.setPredefinedGradient('viridis')
-        self.imageViewXY.timeLine.sigPositionChanged.connect(self.updateMarkersFromSliders)
-        self.dockXY.setWidget(self.imageViewXY)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.dockXY)
-
-        # XZ View
-        self.dockXZ = QDockWidget("XZ View", self)
-        self.imageViewXZ = pg.ImageView()
-        self.imageViewXZ.ui.roiBtn.hide()
-        self.imageViewXZ.ui.menuBtn.hide()
-        self.imageViewXZ.setPredefinedGradient('viridis')
-        self.imageViewXZ.timeLine.sigPositionChanged.connect(self.updateMarkersFromSliders)
-        self.dockXZ.setWidget(self.imageViewXZ)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.dockXZ)
-
-        # YZ View
-        self.dockYZ = QDockWidget("YZ View", self)
-        self.imageViewYZ = pg.ImageView()
-        self.imageViewYZ.ui.roiBtn.hide()
-        self.imageViewYZ.ui.menuBtn.hide()
-        self.imageViewYZ.setPredefinedGradient('viridis')
-        self.imageViewYZ.timeLine.sigPositionChanged.connect(self.updateMarkersFromSliders)
-        self.dockYZ.setWidget(self.imageViewYZ)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.dockYZ)
-
-
-        # Set size policies for the image views
-        for view in [self.imageViewXY, self.imageViewXZ, self.imageViewYZ]:
-            view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            view.setMinimumSize(200, 200)
 
     def updateMarkersFromSliders(self):
         self.updateSliceMarkers()
         self.create3DVisualization()  # This might be heavy, consider optimizing if performance is an issue
 
+
     def updateSliceMarkers(self):
         if not hasattr(self, 'data') or self.data is None:
             return
 
-        # Remove old slice marker items
-        for item in self.slice_marker_items:
-            try:
-                self.blobGLView.removeItem(item)
-            except:
-                pass
-
-        for item in self.main_slice_marker_items:
-            try:
-                self.glView.removeItem(item)
-            except:
-                pass
-
-        self.slice_marker_items.clear()
-        self.main_slice_marker_items.clear()
-
+        self.visualization_manager.clear_slice_markers()
 
         if self.showSliceMarkersCheck.isChecked():
             _, _, depth, height, width = self.data.shape  # Assuming shape is (t, c, z, y, x)
@@ -1001,385 +1324,25 @@ class LightsheetViewer(QMainWindow):
             y_slice = int(self.imageViewXZ.currentIndex)
             x_slice = int(self.imageViewYZ.currentIndex)
 
-            # Create new markers
-            x_marker = gl.GLLinePlotItem(pos=np.array([[x_slice, 0, 0], [x_slice, height, 0], [x_slice, height, depth], [x_slice, 0, depth]]),
-                                              color=(1, 0, 0, 1), width=2, mode='line_strip')
-            y_marker = gl.GLLinePlotItem(pos=np.array([[0, y_slice, 0], [width, y_slice, 0], [width, y_slice, depth], [0, y_slice, depth]]),
-                                              color=(0, 1, 0, 1), width=2, mode='line_strip')
-            z_marker = gl.GLLinePlotItem(pos=np.array([[0, 0, z_slice], [width, 0, z_slice], [width, height, z_slice], [0, height, z_slice]]),
-                                              color=(0, 0, 1, 1), width=2, mode='line_strip')
-
-            # Add new markers
-            self.glView.addItem(x_marker)
-            self.glView.addItem(y_marker)
-            self.glView.addItem(z_marker)
-
-
-            # Create and add new markers for blob visualization view
-            x_marker_vis = gl.GLLinePlotItem(pos=np.array([[x_slice, 0, 0], [x_slice, height, 0], [x_slice, height, depth], [x_slice, 0, depth]]),
-                                             color=(1, 0, 0, 1), width=2, mode='line_strip')
-            y_marker_vis = gl.GLLinePlotItem(pos=np.array([[0, y_slice, 0], [width, y_slice, 0], [width, y_slice, depth], [0, y_slice, depth]]),
-                                             color=(0, 1, 0, 1), width=2, mode='line_strip')
-            z_marker_vis = gl.GLLinePlotItem(pos=np.array([[0, 0, z_slice], [width, 0, z_slice], [width, height, z_slice], [0, height, z_slice]]),
-                                             color=(0, 0, 1, 1), width=2, mode='line_strip')
-
-            self.blobGLView.addItem(x_marker_vis)
-            self.blobGLView.addItem(y_marker_vis)
-            self.blobGLView.addItem(z_marker_vis)
-
-            self.glView.update()
-            self.blobGLView.update()
-
-            self.slice_marker_items.extend([x_marker_vis, y_marker_vis, z_marker_vis])
-            self.main_slice_marker_items.extend([x_marker, y_marker, z_marker])
-
-            self.logger.debug(f"Slice positions - X: {x_slice}, Y: {y_slice}, Z: {z_slice}")
-
-    def createDataGenerationDock(self):
-        self.dockDataGeneration = QDockWidget("Data Generation", self)
-        dataGenWidget = QWidget()
-        layout = QVBoxLayout(dataGenWidget)
-
-        layout.addWidget(QLabel("Number of Volumes:"))
-        self.numVolumesSpinBox = QSpinBox()
-        self.numVolumesSpinBox.setRange(1, 100)
-        self.numVolumesSpinBox.setValue(10)
-        layout.addWidget(self.numVolumesSpinBox)
-
-        layout.addWidget(QLabel("Number of Blobs:"))
-        self.numBlobsSpinBox = QSpinBox()
-        self.numBlobsSpinBox.setRange(1, 100)
-        self.numBlobsSpinBox.setValue(30)
-        layout.addWidget(self.numBlobsSpinBox)
-
-        layout.addWidget(QLabel("Noise Level:"))
-        self.noiseLevelSpinBox = QDoubleSpinBox()
-        self.noiseLevelSpinBox.setRange(0, 1)
-        self.noiseLevelSpinBox.setSingleStep(0.01)
-        self.noiseLevelSpinBox.setValue(0.02)
-        layout.addWidget(self.noiseLevelSpinBox)
-
-        layout.addWidget(QLabel("Movement Speed:"))
-        self.movementSpeedSpinBox = QDoubleSpinBox()
-        self.movementSpeedSpinBox.setRange(0, 10)
-        self.movementSpeedSpinBox.setSingleStep(0.1)
-        self.movementSpeedSpinBox.setValue(0.5)
-        layout.addWidget(self.movementSpeedSpinBox)
-
-        # Add checkbox for structured data
-        self.structuredDataCheck = QCheckBox("Generate Structured Data")
-        self.structuredDataCheck.setChecked(False)
-        layout.addWidget(self.structuredDataCheck)
-
-        # Add options for channel ranges
-        self.channelRangeWidgets = []
-        for i in range(2):  # Assuming 2 channels for now
-            channelLayout = QGridLayout()
-            channelLayout.addWidget(QLabel(f"Channel {i+1} Range:"), 0, 0, 1, 6)
-
-            channelLayout.addWidget(QLabel("X min"), 1, 0)
-            xMinSpin = QSpinBox()
-            channelLayout.addWidget(xMinSpin, 1, 1)
-
-            channelLayout.addWidget(QLabel("X max"), 1, 2)
-            xMaxSpin = QSpinBox()
-            channelLayout.addWidget(xMaxSpin, 1, 3)
-
-            channelLayout.addWidget(QLabel("Y min"), 2, 0)
-            yMinSpin = QSpinBox()
-            channelLayout.addWidget(yMinSpin, 2, 1)
-
-            channelLayout.addWidget(QLabel("Y max"), 2, 2)
-            yMaxSpin = QSpinBox()
-            channelLayout.addWidget(yMaxSpin, 2, 3)
-
-            channelLayout.addWidget(QLabel("Z min"), 3, 0)
-            zMinSpin = QSpinBox()
-            channelLayout.addWidget(zMinSpin, 3, 1)
-
-            channelLayout.addWidget(QLabel("Z max"), 3, 2)
-            zMaxSpin = QSpinBox()
-            channelLayout.addWidget(zMaxSpin, 3, 3)
-
-            for spin in [xMinSpin, xMaxSpin, yMinSpin, yMaxSpin, zMinSpin, zMaxSpin]:
-                spin.setRange(0, 100)
-
-            self.channelRangeWidgets.append((xMinSpin, xMaxSpin, yMinSpin, yMaxSpin, zMinSpin, zMaxSpin))
-            layout.addLayout(channelLayout)
-
-        self.generateButton = QPushButton("Generate New Data")
-        self.generateButton.clicked.connect(self.generateData)
-        layout.addWidget(self.generateButton)
-
-        self.saveButton = QPushButton("Save Data")
-        self.saveButton.clicked.connect(self.saveData)
-        layout.addWidget(self.saveButton)
-
-        self.loadButton = QPushButton("Load Data")
-        self.loadButton.clicked.connect(self.loadData)
-        layout.addWidget(self.loadButton)
-
-        layout.addStretch(1)  # This pushes everything up
-        self.dockDataGeneration.setWidget(dataGenWidget)
-
-    def createBlobDetectionDock(self):
-        self.dockBlobDetection = QDockWidget("Blob Detection", self)
-        blobDetectionWidget = QWidget()
-        layout = QVBoxLayout(blobDetectionWidget)
-
-        # Blob Detection controls
-        layout.addWidget(QLabel("Blob Detection:"))
-
-        blobLayout = QGridLayout()
-
-        blobLayout.addWidget(QLabel("Max Sigma:"), 0, 0)
-        self.maxSigmaSpinBox = QDoubleSpinBox()
-        self.maxSigmaSpinBox.setRange(1, 100)
-        self.maxSigmaSpinBox.setValue(30)
-        blobLayout.addWidget(self.maxSigmaSpinBox, 0, 1)
-
-        blobLayout.addWidget(QLabel("Num Sigma:"), 1, 0)
-        self.numSigmaSpinBox = QSpinBox()
-        self.numSigmaSpinBox.setRange(1, 20)
-        self.numSigmaSpinBox.setValue(10)
-        blobLayout.addWidget(self.numSigmaSpinBox, 1, 1)
-
-        blobLayout.addWidget(QLabel("Threshold:"), 2, 0)
-        self.blobThresholdSpinBox = QDoubleSpinBox()
-        self.blobThresholdSpinBox.setRange(0, 1)
-        self.blobThresholdSpinBox.setSingleStep(0.01)
-        self.blobThresholdSpinBox.setValue(0.5)
-        blobLayout.addWidget(self.blobThresholdSpinBox, 2, 1)
-
-        layout.addLayout(blobLayout)
-
-        # Add checkbox for showing all blobs
-        self.showAllBlobsCheck = QCheckBox("Show All Blobs")
-        self.showAllBlobsCheck.setChecked(False)
-        self.showAllBlobsCheck.stateChanged.connect(self.updateBlobVisualization)
-        layout.addWidget(self.showAllBlobsCheck)
-
-        # Add Blob Detection button
-        self.blobDetectionButton = QPushButton("Detect Blobs")
-        self.blobDetectionButton.clicked.connect(self.detect_blobs)
-        layout.addWidget(self.blobDetectionButton)
-
-        # Add button to show/hide blob results
-        self.showBlobResultsButton = QPushButton("Show Blob Results")
-        self.showBlobResultsButton.clicked.connect(self.toggleBlobResults)
-        layout.addWidget(self.showBlobResultsButton)
-
-        # Add Blob Analysis button
-        self.blobAnalysisButton = QPushButton("Analyze Blobs")
-        self.blobAnalysisButton.clicked.connect(self.analyzeBlobsasdkjfb)
-        layout.addWidget(self.blobAnalysisButton)
-
-        # Time Series Analysis button
-        self.timeSeriesButton = QPushButton("Time Series Analysis")
-        self.timeSeriesButton.clicked.connect(self.showTimeSeriesAnalysis)
-        layout.addWidget(self.timeSeriesButton)
-
-        layout.addStretch(1)  # This pushes everything up
-        self.dockBlobDetection.setWidget(blobDetectionWidget)
-
-
-    def createVisualizationControlDock(self):
-        self.dockVisualizationControl = QDockWidget("Visualization Control", self)
-        visControlWidget = QWidget()
-        layout = QVBoxLayout(visControlWidget)
-
-        # Set up channel controls widget
-        self.setupChannelControlsWidget()
-        layout.addWidget(self.channelControlsWidget)
-
-        # Add checkbox for downsampling
-        self.downsamplingCheckBox = QCheckBox("Enable Downsampling")
-        self.downsamplingCheckBox.setChecked(False)  # Default is off
-        self.downsamplingCheckBox.stateChanged.connect(self.toggleDownsamplingControls)
-        self.downsamplingCheckBox.stateChanged.connect(self.updateVisualization)
-        layout.addWidget(self.downsamplingCheckBox)
-
-        # Downsampling control (now in a separate layout)
-        downsamplingLayout = QHBoxLayout()
-        downsamplingLayout.addWidget(QLabel("Max Points:"))
-        self.downsamplingSpinBox = QSpinBox()
-        self.downsamplingSpinBox.setRange(1000, 1000000)
-        self.downsamplingSpinBox.setSingleStep(1000)
-        self.downsamplingSpinBox.setValue(100000)
-        self.downsamplingSpinBox.valueChanged.connect(self.updateVisualization)
-        downsamplingLayout.addWidget(self.downsamplingSpinBox)
-        layout.addLayout(downsamplingLayout)
-
-        layout.addWidget(QLabel("Threshold:"))
-        self.thresholdSpinBox = QDoubleSpinBox()
-        self.thresholdSpinBox.setRange(0, 1)
-        self.thresholdSpinBox.setSingleStep(0.1)
-        self.thresholdSpinBox.setValue(0.2)
-        self.thresholdSpinBox.valueChanged.connect(self.updateThreshold)
-        layout.addWidget(self.thresholdSpinBox)
-
-        # Point size control
-        layout.addWidget(QLabel("Point Size:"))
-        self.pointSizeSpinBox = QDoubleSpinBox()
-        self.pointSizeSpinBox.setRange(0.1, 10)
-        self.pointSizeSpinBox.setSingleStep(0.1)
-        self.pointSizeSpinBox.setValue(2)
-        self.pointSizeSpinBox.valueChanged.connect(self.updateVisualization)
-        layout.addWidget(self.pointSizeSpinBox)
-
-        layout.addWidget(QLabel("3D Rendering Mode:"))
-        self.renderModeCombo = QComboBox()
-        self.renderModeCombo.addItems(["Points", "Surface", "Wireframe"])
-        self.renderModeCombo.currentTextChanged.connect(self.updateRenderMode)
-        layout.addWidget(self.renderModeCombo)
-
-        layout.addWidget(QLabel("Color Map:"))
-        self.colorMapCombo = QComboBox()
-        self.colorMapCombo.addItems(["Viridis", "Plasma", "Inferno", "Magma", "Grayscale"])
-        self.colorMapCombo.currentTextChanged.connect(self.updateColorMap)
-        layout.addWidget(self.colorMapCombo)
-
-        self.showSliceMarkersCheck = QCheckBox("Show Slice Markers")
-        self.showSliceMarkersCheck.stateChanged.connect(self.toggleSliceMarkers)
-        layout.addWidget(self.showSliceMarkersCheck)
-
-        layout.addWidget(QLabel("Clip Plane:"))
-        self.clipSlider = QSlider(Qt.Horizontal)
-        self.clipSlider.setMinimum(0)
-        self.clipSlider.setMaximum(100)
-        self.clipSlider.setValue(100)
-        self.clipSlider.valueChanged.connect(self.updateClipPlane)
-        layout.addWidget(self.clipSlider)
-
-        # Add checkbox for synchronizing views
-        self.syncViewsCheck = QCheckBox("Synchronize 3D Views")
-        self.syncViewsCheck.setChecked(False)
-        layout.addWidget(self.syncViewsCheck)
-
-        # Add button for auto-scaling
-        self.autoScaleButton = QPushButton("Auto Scale Views")
-        self.autoScaleButton.clicked.connect(self.autoScaleViews)
-        layout.addWidget(self.autoScaleButton)
-
-        # Add buttons for orienting views
-        self.topDownButton = QPushButton("Top-Down View")
-        self.topDownButton.clicked.connect(self.setTopDownView)
-        layout.addWidget(self.topDownButton)
-
-        self.sideViewButton = QPushButton("Side View (XZ)")
-        self.sideViewButton.clicked.connect(self.setSideView)
-        layout.addWidget(self.sideViewButton)
-
-        self.frontViewButton = QPushButton("Front View (YZ)")
-        self.frontViewButton.clicked.connect(self.setFrontView)
-        layout.addWidget(self.frontViewButton)
-
-        layout.addStretch(1)  # This pushes everything up
-        self.dockVisualizationControl.setWidget(visControlWidget)
-
-
-    def createBlobVisualizationDock(self):
-        self.dockBlobVisualization = QDockWidget("Blob Visualization", self)
-        self.blobGLView = gl.GLViewWidget()
-        self.dockBlobVisualization.setWidget(self.blobGLView)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dockBlobVisualization)
-
-        # Add a grid to the view
-        gx = gl.GLGridItem()
-        gx.rotate(90, 0, 1, 0)
-        self.blobGLView.addItem(gx)
-        gy = gl.GLGridItem()
-        gy.rotate(90, 1, 0, 0)
-        self.blobGLView.addItem(gy)
-        gz = gl.GLGridItem()
-        self.blobGLView.addItem(gz)
-
-        # Initialize empty lists to store blob and slice marker items
-        self.blob_items = []
-        self.slice_marker_items = []
-
-        # Connect mouse events
-        self.blobGLView.mousePressEvent = self.on3DViewMousePress
-        self.blobGLView.mouseReleaseEvent = self.on3DViewMouseRelease
-        self.blobGLView.mouseMoveEvent = self.on3DViewMouseMove
-        self.blobGLView.wheelEvent = self.on3DViewWheel
-        self.logger.debug(f"Blob visualization dock created. blobGLView: {self.blobGLView}")
-
-    def create3DVisualizationDock(self):
-        # 3D View
-        self.dock3D = QDockWidget("3D View", self)
-        self.glView = gl.GLViewWidget()
-        self.dock3D.setWidget(self.glView)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dock3D)
-
-        #set camera positon
-        self.glView.setCameraPosition(distance=50, elevation=30, azimuth=45)
-        self.glView.opts['backgroundColor'] = pg.mkColor(20, 20, 20)  # Dark background
-
-
-        # Add a grid to the view
-        gx = gl.GLGridItem()
-        gx.rotate(90, 0, 1, 0)
-        self.glView.addItem(gx)
-        gy = gl.GLGridItem()
-        gy.rotate(90, 1, 0, 0)
-        self.glView.addItem(gy)
-        gz = gl.GLGridItem()
-        self.glView.addItem(gz)
-
-        # Initialize empty lists to store data and slice marker items
-        self.data_items = []
-        self.main_slice_marker_items = []
-
-        self.glView.opts['fov'] = 60
-        self.glView.opts['elevation'] = 30
-        self.glView.opts['azimuth'] = 45
-
-        # Connect mouse events
-        self.glView.mousePressEvent = self.on3DViewMousePress
-        self.glView.mouseReleaseEvent = self.on3DViewMouseRelease
-        self.glView.mouseMoveEvent = self.on3DViewMouseMove
-        self.glView.wheelEvent = self.on3DViewWheel
-        self.logger.debug(f"3D visualization dock created. glView: {self.glView}")
+            self.visualization_manager.create_slice_markers(x_slice, y_slice, z_slice, width, height, depth)
+
+        self.glView.update()
+        self.blobGLView.update()
+
+
+    def create3DVisualization(self):
+        try:
+            t = self.timeSlider.value()
+            threshold = self.thresholdSpinBox.value()
+            render_mode = self.getRenderMode()
+            self.visualization_manager.update_3d_visualization(self.data, t, threshold, render_mode)
+        except Exception as e:
+            self.handle3DVisualizationError(e)
 
 
     def visualize_blobs(self, blobs):
-        # Remove old blob visualizations
-        for item in self.blob_items:
-            self.blobGLView.removeItem(item)
-        self.blob_items.clear()
-
         current_time = self.timeSlider.value()
-
-        # Define colors for each channel (you can adjust these)
-        channel_colors = self.channel_colors
-
-        # Add new blob visualizations
-        for blob in blobs:
-            y, x, z, r, channel, t, intensity = blob
-            mesh = gl.MeshData.sphere(rows=10, cols=20, radius=r)
-
-            # Get color based on channel
-            base_color = channel_colors[int(channel) % len(channel_colors)]
-
-            # Adjust color based on whether it's a current or past blob
-            if t == current_time:
-                color = base_color
-            else:
-                color = tuple(c * 0.5 for c in base_color[:3]) + (base_color[3] * 0.5,)  # Dimmed color for past blobs
-
-            ## Optionally, adjust color based on intensity
-            #alpha = min(1.0, intensity / 255.0)  # Assuming intensity is in 0-255 range
-            #color = (*base_color[:3], alpha)
-
-
-            # Add to blob visualization view
-            blob_item_vis = gl.GLMeshItem(meshdata=mesh, smooth=True, color=color, shader='shaded')
-            blob_item_vis.translate(z, x, y)  # Swapped y and z
-            self.blobGLView.addItem(blob_item_vis)
-            self.blob_items.append(blob_item_vis)
-
-        self.blobGLView.update()
+        self.visualization_manager.visualize_blobs(blobs, current_time, self.channel_colors)
 
     def advanceTimePoint(self):
         current_time = self.timeSlider.value()
@@ -1399,41 +1362,6 @@ class LightsheetViewer(QMainWindow):
             self.updateBlobVisualization()
         else:
             self.logger.warning("No data available to update time point")
-
-    def createPlaybackControlDock(self):
-        self.dockPlaybackControl = QDockWidget("Playback Control", self)
-        playbackControlWidget = QWidget()
-        layout = QVBoxLayout(playbackControlWidget)
-
-        layout.addWidget(QLabel("Time:"))
-        self.timeSlider = QSlider(Qt.Horizontal)
-        self.timeSlider.setMinimum(0)
-        #self.timeSlider.setMaximum(self.data.shape[0] - 1)  # Assuming first dimension is time
-        self.timeSlider.valueChanged.connect(self.updateTimePoint)
-        layout.addWidget(self.timeSlider)
-
-        playbackLayout = QHBoxLayout()
-        self.playPauseButton = QPushButton("Play")
-        self.playPauseButton.clicked.connect(self.togglePlayback)
-        playbackLayout.addWidget(self.playPauseButton)
-
-        self.speedLabel = QLabel("Speed:")
-        playbackLayout.addWidget(self.speedLabel)
-
-        self.speedSpinBox = QDoubleSpinBox()
-        self.speedSpinBox.setRange(0.1, 10)
-        self.speedSpinBox.setSingleStep(0.1)
-        self.speedSpinBox.setValue(1)
-        self.speedSpinBox.valueChanged.connect(self.updatePlaybackSpeed)
-        playbackLayout.addWidget(self.speedSpinBox)
-
-        self.loopCheckBox = QCheckBox("Loop")
-        playbackLayout.addWidget(self.loopCheckBox)
-
-        layout.addLayout(playbackLayout)
-
-        layout.addStretch(1)  # This pushes everything up
-        self.dockPlaybackControl.setWidget(playbackControlWidget)
 
 
     def resizeEvent(self, event):
@@ -1472,7 +1400,9 @@ class LightsheetViewer(QMainWindow):
         viewMenu = menuBar.addMenu('&View')
 
         for dock in [self.dockXY, self.dockXZ, self.dockYZ, self.dock3D,
-                     self.dockDataGeneration, self.dockVisualizationControl, self.dockPlaybackControl]:
+                     self.ui_manager.dockChannelControls,  # Add this line
+                     self.dockDataGeneration, self.dockVisualizationControl,
+                     self.dockPlaybackControl, self.dockBlobDetection]:
             viewMenu.addAction(dock.toggleViewAction())
 
 
@@ -1481,11 +1411,53 @@ class LightsheetViewer(QMainWindow):
         timeSeriesAction.triggered.connect(self.showTimeSeriesAnalysis)
 
         # Add a new menu item for the Biological Simulation window
-        viewMenu = menuBar.addMenu('&View')
+        simulationMenu = menuBar.addMenu('&Simulation')
         self.showBioSimAction = QAction('Biological Simulation', self, checkable=True)
         self.showBioSimAction.triggered.connect(self.toggleBiologicalSimulationWindow)
-        viewMenu.addAction(self.showBioSimAction)
+        simulationMenu.addAction(self.showBioSimAction)
 
+        # Add this new action
+        self.showEnhancedBioSimAction = QAction('Enhanced Biological Simulation', self, checkable=True)
+        self.showEnhancedBioSimAction.triggered.connect(self.toggleEnhancedBiologicalSimulationWindow)
+
+        self.shapeSimAction = simulationMenu.addAction('Run Shape Simulation')
+        self.shapeSimAction.triggered.connect(self.showShapeSimulationDialog)
+
+
+        simulationMenu.addAction(self.showEnhancedBioSimAction)
+
+        # Add a new menu for simulations
+        simulationMenu = menuBar.addMenu('&Simulation')
+
+        blobSimAction = simulationMenu.addAction('Blob Simulation')
+        blobSimAction.triggered.connect(self.runBlobSimulation)
+
+        bioSimAction = simulationMenu.addAction('Biological Simulation')
+        bioSimAction.triggered.connect(self.runBiologicalSimulation)
+
+    def runBlobSimulation(self):
+        # Existing blob simulation code
+        pass
+
+    def showShapeSimulationDialog(self):
+        dialog = ShapeSimulationDialog(self)
+        if dialog.exec_():
+            params = dialog.get_params()
+            self.runShapeSimulation(params)
+
+
+    def toggleEnhancedBiologicalSimulationWindow(self, checked):
+        if checked:
+            if not hasattr(self, 'enhanced_biological_simulation_window'):
+                self.enhanced_biological_simulation_window = QMainWindow(self)
+                self.enhanced_biological_simulation_window.setWindowTitle("Enhanced Biological Simulation")
+                simulation_widget = EnhancedBiologicalSimulationWidget()
+                simulation_widget.simulationRequested.connect(self.runEnhancedBiologicalSimulation)
+                self.enhanced_biological_simulation_window.setCentralWidget(simulation_widget)
+            self.enhanced_biological_simulation_window.show()
+        else:
+            if hasattr(self, 'enhanced_biological_simulation_window'):
+                self.enhanced_biological_simulation_window.hide()
 
     def toggleBiologicalSimulationWindow(self, checked):
         if checked:
@@ -1504,27 +1476,17 @@ class LightsheetViewer(QMainWindow):
     def generateData(self):
         try:
             params = self.getDataGenerationParams()
-            if params['structured_data']:
-                channel_ranges = [
-                    ((ch['x'][0], ch['x'][1]), (ch['y'][0], ch['y'][1]), (ch['z'][0], ch['z'][1]))
-                    for ch in params['channel_ranges']
-                ]
-                self.data = self.generateStructuredData(params, channel_ranges)
-            else:
-                self.data = self.generateUnstructuredData(params)
-
-            self.logDataInfo()
+            self.data = self.data_manager.generate_data(params)
             self.updateUIForNewData()
             self.updateViews()
             self.create3DVisualization()
             self.autoScaleViews()
             self.logger.info("Data generated and visualized successfully")
-
         except Exception as e:
             self.handleDataGenerationError(e)
 
     def getDataGenerationParams(self):
-        return {
+        params = {
             'num_volumes': self.numVolumesSpinBox.value(),
             'num_blobs': self.numBlobsSpinBox.value(),
             'noise_level': self.noiseLevelSpinBox.value(),
@@ -1534,49 +1496,18 @@ class LightsheetViewer(QMainWindow):
             'num_channels': 2  # You can make this configurable if needed
         }
 
-    def generateStructuredData(self, params):
-        channel_ranges = self.getChannelRanges(params)
-        return self.data_generator.generate_structured_multi_channel_time_series(
-            num_volumes=params['num_volumes'],
-            num_channels=params['num_channels'],
-            size=params['size'],
-            num_blobs=params['num_blobs'],
-            intensity_range=(0.8, 1.0),
-            sigma_range=(2, 6),
-            noise_level=params['noise_level'],
-            movement_speed=params['movement_speed'],
-            channel_ranges=channel_ranges
-        )
+        if params['structured_data']:
+            params['channel_ranges'] = []
+            for widgets in self.channelRangeWidgets:
+                xMin, xMax, yMin, yMax, zMin, zMax = [w.value() for w in widgets]
+                params['channel_ranges'].append({
+                    'x': (xMin, xMax),
+                    'y': (yMin, yMax),
+                    'z': (zMin, zMax)
+                })
 
-    def generateUnstructuredData(self, params):
-        return self.data_generator.generate_multi_channel_time_series(
-            num_volumes=params['num_volumes'],
-            num_channels=params['num_channels'],
-            size=params['size'],
-            num_blobs=params['num_blobs'],
-            intensity_range=(0.8, 1.0),
-            sigma_range=(2, 6),
-            noise_level=params['noise_level'],
-            movement_speed=params['movement_speed']
-        )
+        return params
 
-    def getChannelRanges(self, params):
-        channel_ranges = []
-        for widgets in self.channelRangeWidgets:
-            xMin, xMax, yMin, yMax, zMin, zMax = [w.value() for w in widgets]
-            channel_ranges.append(((xMin, xMax), (yMin, yMax), (zMin, zMax)))
-
-        # If we have fewer channel ranges than channels, add default ranges
-        while len(channel_ranges) < params['num_channels']:
-            channel_ranges.append(((0, params['size'][2]), (0, params['size'][1]), (0, params['size'][0])))
-
-        return channel_ranges
-
-    def logDataInfo(self):
-        self.logger.info(f"Generated data shape: {self.data.shape}")
-        self.logger.info(f"Data min: {self.data.min()}, max: {self.data.max()}, mean: {self.data.mean()}")
-        num_blobs = self.numBlobsSpinBox.value() * self.data.shape[1] * self.data.shape[0]
-        self.logger.info(f"Generated {num_blobs} blobs")
 
     def handleDataGenerationError(self, e):
         self.logger.error(f"Error in data generation: {str(e)}")
@@ -1584,6 +1515,7 @@ class LightsheetViewer(QMainWindow):
         self.logger.error(f"Error args: {e.args}")
         self.logger.error(f"Traceback: {traceback.format_exc()}")
         QMessageBox.critical(self, "Error", f"Failed to generate data: {str(e)}")
+
 
     def updateViews(self):
         if self.data is None:
@@ -1595,43 +1527,8 @@ class LightsheetViewer(QMainWindow):
         self.logger.debug(f"Updating views for time point {t}")
         self.logger.debug(f"Data shape: {self.data.shape}")
 
-        num_channels = self.data.shape[1]
-        depth, height, width = self.data.shape[2:]
-
-        # Prepare 3D RGB images for each view
-        combined_xy = np.zeros((depth, height, width, 3))
-        combined_xz = np.zeros((height, depth, width, 3))
-        combined_yz = np.zeros((height, depth, width, 3))
-
-        # Define colors for each channel (RGB)
-        channel_colors = [
-            (1, 0, 0), (0, 1, 0), (0, 0, 1),  # Red, Green, Blue
-            (1, 1, 0), (1, 0, 1), (0, 1, 1),  # Yellow, Magenta, Cyan
-            (0.5, 0.5, 0.5), (1, 0.5, 0),     # Gray, Orange
-        ]
-
-        for c in range(num_channels):
-            if c < len(self.channelControls) and self.channelControls[c][0].isChecked():
-                opacity = self.channelControls[c][1].value() / 100
-                channel_data = self.data[t, c]
-
-                # Normalize channel data
-                channel_data = (channel_data - channel_data.min()) / (channel_data.max() - channel_data.min() + 1e-8)
-
-                channel_data[channel_data < threshold] = 0
-
-                # Apply color to the channel
-                color = channel_colors[c % len(channel_colors)]
-                colored_data = channel_data[:, :, :, np.newaxis] * color
-
-                combined_xy += colored_data * opacity
-                combined_xz += np.transpose(colored_data, (1, 0, 2, 3)) * opacity
-                combined_yz += np.transpose(colored_data, (2, 0, 1, 3)) * opacity
-
-        # Clip values to [0, 1] range
-        combined_xy = np.clip(combined_xy, 0, 1)
-        combined_xz = np.clip(combined_xz, 0, 1)
-        combined_yz = np.clip(combined_yz, 0, 1)
+        combined_xy, combined_xz, combined_yz = self.visualization_manager.update_views(
+            self.data, t, threshold, self.ui_manager.channel_controls)
 
         self.imageViewXY.setImage(combined_xy, autoLevels=False, levels=[0, 1])
         self.imageViewXZ.setImage(combined_xz, autoLevels=False, levels=[0, 1])
@@ -1639,57 +1536,11 @@ class LightsheetViewer(QMainWindow):
 
         self.updateSliceMarkers()
 
-    def create3DVisualization(self):
-        try:
-            self.clear3DVisualization()
-            t = self.timeSlider.value()
-            threshold = self.thresholdSpinBox.value()
-            render_mode = self.getRenderMode()
-
-            for c in range(self.data.shape[1]):
-                if self.isChannelVisible(c):
-                    try:
-                        self.visualizeChannel(c, t, threshold, render_mode)
-                    except Exception as e:
-                        self.logger.error(f"Error visualizing channel {c}: {str(e)}")
-                        self.logger.error(f"Traceback: {traceback.format_exc()}")
-
-            self.glView.update()
-
-        except Exception as e:
-            self.handle3DVisualizationError(e)
-
-    def clear3DVisualization(self):
-        for item in self.data_items:
-            self.glView.removeItem(item)
-        self.data_items.clear()
 
     def isChannelVisible(self, channel):
-        return (channel < len(self.channelControls) and
-                self.channelControls[channel][0].isChecked())
+        return (channel < len(self.ui_manager.channel_controls) and
+                self.ui_manager.channel_controls[channel][0].isChecked())
 
-    def visualizeChannel(self, channel, time, threshold, render_mode):
-        volume_data = self.data[time, channel]
-        opacity = self.getChannelOpacity(channel)
-        color = self.getChannelColor(channel)
-
-        # Ensure color is in the correct format (r, g, b) without alpha
-        color = color[:3]  # Remove alpha if present
-
-        self.renderMesh(volume_data, threshold, color, opacity, render_mode)
-
-
-    def renderPoints(self, volume_data, threshold, color, opacity):
-        z, y, x = np.where(volume_data > threshold)
-        pos = np.column_stack((x, y, z))
-
-        if len(pos) > 0:
-            colors = np.tile(color, (len(pos), 1))
-            colors[:, 3] = opacity * (volume_data[z, y, x] - volume_data.min()) / (volume_data.max() - volume_data.min())
-
-            scatter = gl.GLScatterPlotItem(pos=pos, color=colors, size=self.scatterPointSizeSpinBox.value())
-            self.glView.addItem(scatter)
-            self.data_items.append(scatter)
 
     def hasDegenerateTriangles(self, verts, faces):
         # Check if any triangle has zero area
@@ -1699,58 +1550,6 @@ class LightsheetViewer(QMainWindow):
         cross = np.cross(v1 - v0, v2 - v0)
         areas = 0.5 * np.sqrt((cross**2).sum(axis=1))
         return np.any(areas < 1e-10)
-
-    def renderMesh(self, volume_data, threshold, color, opacity, render_mode):
-        if render_mode == 'points':
-            z, y, x = np.where(volume_data > threshold)
-            pos = np.column_stack((x, y, z))
-
-            if len(pos) > 0:
-                original_points = len(pos)
-                # Downsample if enabled and there are too many points
-                if self.downsamplingCheckBox.isChecked():
-                    max_points = self.downsamplingSpinBox.value()
-                    if len(pos) > max_points:
-                        indices = np.random.choice(len(pos), max_points, replace=False)
-                        pos = pos[indices]
-                        self.logger.info(f"Downsampled from {original_points} to {len(pos)} points")
-                    else:
-                        self.logger.info(f"Rendering {len(pos)} points (no downsampling needed)")
-                else:
-                    self.logger.info(f"Rendering all {len(pos)} points (downsampling disabled)")
-
-                size = np.ones(len(pos)) * self.pointSizeSpinBox.value()
-                color_array = np.tile(color + (opacity,), (len(pos), 1))
-                scatter = gl.GLScatterPlotItem(pos=pos, size=size, color=color_array)
-                self.glView.addItem(scatter)
-                self.data_items.append(scatter)
-            else:
-                self.logger.info("No points above threshold for point rendering.")
-        else:
-            # For surface and wireframe, use marching cubes
-            verts, faces = self.marchingCubes(volume_data, threshold)
-            if len(verts) > 0 and len(faces) > 0:
-                # Filter out degenerate triangles
-                valid_faces = self.filterDegenerateTriangles(verts, faces)
-                if len(valid_faces) == 0:
-                    self.logger.warning("No valid triangles after filtering degenerate ones.")
-                    return
-
-                # Render as surface or wireframe
-                mesh = gl.GLMeshItem(vertexes=verts, faces=valid_faces, smooth=True, drawEdges=render_mode=='wireframe')
-                mesh.setColor(color + (opacity,))
-
-                if render_mode == 'wireframe':
-                    # For wireframe, set the face color to be more transparent
-                    mesh.setColor(color + (opacity*0.1,))
-                    # Set edge color (this is done during initialization, not with setEdgeColor)
-                    mesh = gl.GLMeshItem(vertexes=verts, faces=valid_faces, smooth=True, drawEdges=True,
-                                         edgeColor=color + (opacity,))
-
-                self.glView.addItem(mesh)
-                self.data_items.append(mesh)
-            else:
-                self.logger.info("No vertices or faces generated from marching cubes.")
 
 
     def calculateNormals(self, verts, faces):
@@ -1783,15 +1582,6 @@ class LightsheetViewer(QMainWindow):
         return np.array(list(edges))
 
 
-    def marchingCubes(self, volume_data, threshold):
-        try:
-            verts, faces, _, _ = measure.marching_cubes(volume_data, threshold)
-            self.logger.info(f"Marching cubes generated {len(verts)} vertices and {len(faces)} faces")
-            return verts, faces
-        except RuntimeError as e:
-            self.logger.warning(f"Marching cubes failed: {str(e)}")
-            return np.array([]), np.array([])
-
     def logDataStatistics(self, volume_data):
         self.logger.info(f"Data shape: {volume_data.shape}")
         self.logger.info(f"Data range: {volume_data.min()} to {volume_data.max()}")
@@ -1801,10 +1591,8 @@ class LightsheetViewer(QMainWindow):
 
 
     def getChannelOpacity(self, channel):
-        return self.channelControls[channel][1].value() / 100
+        return self.ui_manager.channel_controls[channel][1].value() / 100
 
-    def getChannelColor(self, channel):
-        return self.channel_colors[channel % len(self.channel_colors)]
 
     def getRenderMode(self):
         return self.renderModeCombo.currentText().lower()
@@ -1908,42 +1696,44 @@ class LightsheetViewer(QMainWindow):
     def updateBlobThreshold(self, value):
        self.filter_blobs()
 
-    def saveData(self):
-        try:
-            filename, _ = QFileDialog.getSaveFileName(self, "Save Data", "", "TIFF Files (*.tiff);;NumPy Files (*.npy)")
-            if filename:
-                if filename.endswith('.tiff'):
-                    self.data_generator.save_tiff(filename)
-                elif filename.endswith('.npy'):
-                    self.data_generator.save_numpy(filename)
-                self.logger.info(f"Data saved to {filename}")
-        except Exception as e:
-            self.logger.error(f"Error saving data: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to save data: {str(e)}")
 
     def loadData(self):
         try:
             filename, _ = QFileDialog.getOpenFileName(self, "Load Data", "", "TIFF Files (*.tiff);;NumPy Files (*.npy)")
             if filename:
-                if filename.endswith('.tiff'):
-                    self.data = self.data_generator.load_tiff(filename)
-                elif filename.endswith('.npy'):
-                    self.data = self.data_generator.load_numpy(filename)
-
-                self.timeSlider.setMaximum(self.data.shape[0] - 1)
+                self.data = self.data_manager.load_data(filename)
+                self.updateUIForNewData()
                 self.updateViews()
                 self.create3DVisualization()
-                self.autoScaleViews()  # Add this line
+                self.autoScaleViews()
                 self.logger.info(f"Data loaded from {filename}")
 
-                # Stop playback when loading new data
                 if self.playbackTimer.isActive():
                     self.playbackTimer.stop()
                     self.playPauseButton.setText("Play")
-
         except Exception as e:
-            self.logger.error(f"Error loading data: {str(e)}")
             QMessageBox.critical(self, "Error", f"Failed to load data: {str(e)}")
+
+    def saveData(self):
+        try:
+            filename, _ = QFileDialog.getSaveFileName(self, "Save Data", "", "TIFF Files (*.tiff);;NumPy Files (*.npy)")
+            if filename:
+                self.data_manager.save_data(filename)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save data: {str(e)}")
+
+    def import_microscope_data(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Microscope Data", "",
+                                                   "All Files (*);;SIS Files (*.sis);;TIFF Files (*.tif *.tiff)")
+        if file_path:
+            try:
+                self.data, metadata = self.data_manager.import_microscope_data(file_path)
+                self.updateUIForNewData()
+                self.updateViews()
+                self.create3DVisualization()
+                self.display_metadata(metadata)
+            except Exception as e:
+                QMessageBox.critical(self, "Import Error", str(e))
 
     def toggleDownsamplingControls(self):
         enabled = self.downsamplingCheckBox.isChecked()
@@ -1965,42 +1755,44 @@ class LightsheetViewer(QMainWindow):
         if hasattr(self, 'playbackTimer') and self.playbackTimer.isActive():
             self.playbackTimer.setInterval(int(1000 / value))
 
+
+    def setChannelColor(self, channel, color):
+        if channel < len(self.channel_colors):
+            self.channel_colors[channel] = color
+            self.updateViews()
+            self.create3DVisualization()
+            self.updateBlobVisualization()  # Add this line to update blob colors
+
+
+    def getChannelColor(self, channel):
+        if channel < len(self.channel_colors):
+            color = self.channel_colors[channel]
+            return (color.redF(), color.greenF(), color.blueF(), 1.0)
+        return (1.0, 1.0, 1.0, 1.0)  # Default to white if channel is out of range
+
+
+
+
     def updateUIForNewData(self):
         if self.data is not None:
             self.timeSlider.setMaximum(self.data.shape[0] - 1)
-
-            # Update channel controls
             num_channels = self.data.shape[1]
-            channel_names = ['Membrane', 'Nucleus', 'ER', 'Mitochondria', 'Actin', 'Microtubules', 'Calcium']
 
-            # Clear existing channel controls
-            for i in reversed(range(self.channelControlsLayout.count())):
-                self.channelControlsLayout.itemAt(i).widget().setParent(None)
-            self.channelControls.clear()
+            if self.current_simulation_type == 'shape':
+                channel_names = ['Shapes', 'Empty 1', 'Empty 2', 'Empty 3']
+            elif self.current_simulation_type == 'original':
+                channel_names = ['Membrane', 'Nucleus', 'ER', 'Mitochondria', 'Actin', 'Microtubules', 'Calcium']
+            else:  # 'enhanced'
+                channel_names = ['Membrane', 'Nucleus', 'Cytoplasm', 'Extracellular', 'Proteins']
 
-            for i in range(num_channels):
-                channelLayout = QHBoxLayout()
-                channelLayout.addWidget(QLabel(f"{channel_names[i] if i < len(channel_names) else f'Channel {i+1}'}:"))
-                visibilityCheck = QCheckBox("Visible")
-                visibilityCheck.setChecked(True)
-                visibilityCheck.stateChanged.connect(self.updateChannelVisibility)
-                channelLayout.addWidget(visibilityCheck)
-                opacitySlider = QSlider(Qt.Horizontal)
-                opacitySlider.setRange(0, 100)
-                opacitySlider.setValue(100)
-                opacitySlider.valueChanged.connect(self.updateChannelOpacity)
-                channelLayout.addWidget(opacitySlider)
-                self.channelControls.append((visibilityCheck, opacitySlider))
-
-                channelWidget = QWidget()
-                channelWidget.setLayout(channelLayout)
-                self.channelControlsLayout.addWidget(channelWidget)
-                self.logger.debug(f"Created control for channel {i}")
+            self.ui_manager.update_channel_controls(num_channels, channel_names)
 
             self.updateViews()
             self.create3DVisualization()
         else:
             self.logger.warning("No data available to update UI")
+
+
 
     def closeEvent(self, event):
         # Stop the playback timer
@@ -2019,6 +1811,9 @@ class LightsheetViewer(QMainWindow):
         # Make sure to close the biological simulation window when the main window is closed
         if self.biological_simulation_window:
             self.biological_simulation_window.close()
+
+        if hasattr(self, 'enhanced_biological_simulation_window'):
+            self.enhanced_biological_simulation_window.close()
 
         # Call the base class implementation
         super().closeEvent(event)
@@ -2166,11 +1961,6 @@ class LightsheetViewer(QMainWindow):
         if not hasattr(self, 'all_detected_blobs') or self.all_detected_blobs is None:
             return
 
-        # Clear previous visualizations
-        for item in self.blob_items:
-            self.blobGLView.removeItem(item)
-        self.blob_items.clear()
-
         current_time = self.timeSlider.value()
 
         if self.showAllBlobsCheck.isChecked():
@@ -2178,7 +1968,7 @@ class LightsheetViewer(QMainWindow):
         else:
             blobs_to_show = self.all_detected_blobs[self.all_detected_blobs[:, 5] == current_time]
 
-        self.visualize_blobs(blobs_to_show)
+        self.visualization_manager.visualize_blobs(blobs_to_show, current_time, self.channel_colors)
 
     def toggleBlobResults(self):
         if self.blob_results_dialog.isVisible():
@@ -2345,34 +2135,7 @@ class LightsheetViewer(QMainWindow):
             view.setCameraPosition(elevation=0, azimuth=90)
             view.update()
 
-    def setupChannelControlsWidget(self):
-        self.channelControlsWidget = QWidget()
-        self.channelControlsLayout = QVBoxLayout(self.channelControlsWidget)
-        self.channelControls = []
 
-    def import_microscope_data(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open Microscope Data", "",
-                                                   "All Files (*);;SIS Files (*.sis);;TIFF Files (*.tif *.tiff)")
-        if file_path:
-            try:
-                importer = ImporterFactory.get_importer(file_path)
-                metadata = importer.read_metadata()
-                data = importer.read_data()
-
-                if data is None:
-                    raise ValueError("Failed to read data from the file.")
-
-                # Update the viewer with the new data
-                self.data = data
-                self.updateUIForNewData()
-                self.updateViews()
-                self.create3DVisualization()
-
-                # Display metadata
-                self.display_metadata(metadata)
-
-            except Exception as e:
-                QMessageBox.critical(self, "Import Error", str(e))
 
     def display_metadata(self, metadata):
         if metadata is None:
@@ -2393,6 +2156,163 @@ class LightsheetViewer(QMainWindow):
         layout.addWidget(text_edit)
         dialog.setLayout(layout)
         dialog.exec_()
+
+    def runEnhancedBiologicalSimulation(self, params):
+        try:
+            self.data = None  # Reset data at the start of simulation
+            self.current_simulation_type = 'enhanced'
+
+            # Create CellularEnvironment
+            env_size = params['environment_size']
+            simulator = EnhancedBiologicalSimulator(env_size, num_time_points=100)
+
+            # Create and add cells
+            for _ in range(params['num_cells']):
+                cell_size = (20, 20, 20)  # You might want to make this configurable
+                position = tuple(np.random.randint(0, s - cs) for s, cs in zip(env_size, cell_size))
+                simulator.add_cell(position, cell_size)
+
+            # Add a global protein if diffusion is enabled
+            if params['protein_diffusion']['enabled']:
+                initial_concentration = np.zeros(env_size)
+                initial_concentration[tuple(s // 2 for s in env_size)] = 1.0
+                simulator.add_global_protein('diffusing_protein', initial_concentration, params['protein_diffusion']['coefficient'])
+
+            # Run simulation
+            for state in simulator.run_simulation():
+                self.processSimulationState(state)
+
+            # Add debugging output
+            if self.data is not None:
+                self.logger.info(f"Final data shape: {self.data.shape}")
+                for i in range(self.data.shape[1]):
+                    channel_data = self.data[:, i]
+                    self.logger.info(f"Channel {i} - min: {np.min(channel_data)}, max: {np.max(channel_data)}, mean: {np.mean(channel_data)}")
+
+            self.updateUIForNewData()
+            self.updateViews()
+            self.create3DVisualization()
+
+        except Exception as e:
+            self.handleSimulationError(e)
+
+
+    def processSimulationState(self, state):
+        self.logger.info(f"Processing state with keys: {state.keys()}")
+        for key, value in state.items():
+            if isinstance(value, np.ndarray):
+                self.logger.info(f"State['{key}']: shape={value.shape}, dtype={value.dtype}, min={np.min(value)}, max={np.max(value)}, mean={np.mean(value)}")
+            elif isinstance(value, dict):
+                self.logger.info(f"State['{key}']: dict with keys {value.keys()}")
+            else:
+                self.logger.info(f"State['{key}']: type={type(value)}")
+
+        # Keep each component separate
+        membrane = state['membrane'].astype(float)
+        nucleus = state['nucleus'].astype(float)
+        cytoplasm = state['cytoplasm'].astype(float)
+        extracellular = state['extracellular_space'].astype(float)
+
+        # Combine proteins into one channel (if present)
+        proteins = np.zeros_like(membrane)
+        if 'proteins' in state:
+            for protein_name, concentration in state['proteins'].items():
+                proteins += concentration
+
+        # Combine all channels
+        combined_state = np.stack([membrane, nucleus, cytoplasm, extracellular, proteins], axis=0)
+
+        # Add the combined state to our data
+        if self.data is None:
+            self.data = combined_state[np.newaxis, ...]
+        else:
+            self.data = np.concatenate([self.data, combined_state[np.newaxis, ...]], axis=0)
+
+        self.logger.info(f"Processed state shape: {combined_state.shape}")
+        for i, name in enumerate(['membrane', 'nucleus', 'cytoplasm', 'extracellular', 'proteins']):
+            self.logger.info(f"Channel {i} ({name}) - min: {np.min(combined_state[i])}, max: {np.max(combined_state[i])}, mean: {np.mean(combined_state[i])}")
+
+
+    def runShapeSimulation(self, params):
+        try:
+            self.data = None  # Reset data at the start of simulation
+            self.current_simulation_type = 'shape'
+
+            simulator = ShapeSimulator((100, 100, 100))  # Make sure this matches your desired simulation size
+
+            # Add shapes based on params
+            for shape_params in params['shapes']:
+                if shape_params['type'] == 'sphere':
+                    shape = Sphere(shape_params['position'], shape_params['size'], shape_params['color'])
+                elif shape_params['type'] == 'cube':
+                    shape = Cube(shape_params['position'], shape_params['size'], shape_params['color'])
+                else:
+                    raise ValueError(f"Unknown shape type: {shape_params['type']}")
+
+                if shape_params['movement'] == 'random':
+                    movement = RandomWalk(shape_params['speed'])
+                elif shape_params['movement'] == 'linear':
+                    movement = LinearMotion(shape_params.get('velocity', [1, 0, 0]))
+                else:
+                    raise ValueError(f"Unknown movement type: {shape_params['movement']}")
+
+                simulator.add_shape(shape, movement)
+
+            # Add interactions
+            for interaction_params in params['interactions']:
+                if interaction_params['type'] == 'attraction':
+                    interaction = Attraction(interaction_params.get('strength', 1.0))
+                elif interaction_params['type'] == 'repulsion':
+                    interaction = Repulsion(interaction_params.get('strength', 1.0), interaction_params.get('range', 10))
+                elif interaction_params['type'] == 'none':
+                    continue  # No interaction to add
+                else:
+                    raise ValueError(f"Unknown interaction type: {interaction_params['type']}")
+                simulator.add_interaction(interaction)
+
+            # Run simulation
+            num_steps = params['num_steps']
+            dt = params['dt']
+            resolution = params.get('resolution', 10)  # Get resolution from params or use default
+            for _ in range(num_steps):
+                simulator.update(dt)
+                state = simulator.get_state(resolution)
+                self.processShapeSimulationState(state)
+
+            self.updateUIForNewData()
+            self.updateViews()
+            self.create3DVisualization()
+
+        except Exception as e:
+            self.handleSimulationError(e)
+
+    def processShapeSimulationState(self, state):
+        # Convert boolean state to float
+        float_state = state.astype(float)
+
+        # Create additional dummy channels to match the expected format
+        dummy_channels = np.zeros_like(float_state)
+
+        # Stack the original state with dummy channels
+        combined_state = np.stack([float_state, dummy_channels, dummy_channels, dummy_channels], axis=0)
+
+        if self.data is None:
+            self.data = combined_state[np.newaxis, ...]
+        else:
+            self.data = np.concatenate([self.data, combined_state[np.newaxis, ...]], axis=0)
+
+        self.logger.info(f"Processed state shape: {combined_state.shape}")
+
+    def toggle_intensity_profile_tool(self, checked):
+        if checked:
+            self.visualization_manager.enable_intensity_profile_tool(self.imageViewXY)
+        else:
+            if self.visualization_manager.profile_roi is not None:
+                self.imageViewXY.removeItem(self.visualization_manager.profile_roi)
+                self.visualization_manager.profile_roi = None
+            if self.visualization_manager.profile_window is not None:
+                self.visualization_manager.profile_window.close()
+                self.visualization_manager.profile_window = None
 
 ##############################################################################
 

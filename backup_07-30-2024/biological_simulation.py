@@ -12,6 +12,13 @@ from typing import Tuple, List, Optional, Any, Dict
 from skimage.morphology import skeletonize
 from scipy.ndimage import center_of_mass, binary_dilation, gaussian_filter
 from scipy.spatial.distance import cdist
+from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import label
+from skimage.morphology import skeletonize
+from scipy.spatial import  cKDTree
+from scipy.spatial.transform import Rotation
+from abc import ABC, abstractmethod
+
 
 '''Basic organelle info'''
 '''Within the cytoplasm, the major organelles and cellular structures include: (1) nucleolus (2) nucleus (3) ribosome (4) vesicle (5) rough endoplasmic reticulum (6) Golgi apparatus (7) cytoskeleton (8) smooth endoplasmic reticulum (9) mitochondria (10) vacuole (11) cytosol (12) lysosome (13) centriole'''
@@ -62,7 +69,7 @@ class Cell:
         self.membrane = np.zeros(size, dtype=bool)
         self.nucleus = np.zeros(size, dtype=bool)
         self.cytoplasm = np.zeros(size, dtype=bool)
-        self.organelles = {}
+        self.er = np.zeros(size, dtype=bool)
         self.proteins = {}
         self.diffusion_coefficients = {}
         self.initialize_structures()
@@ -74,15 +81,19 @@ class Cell:
         z, y, x = np.ogrid[:self.size[0], :self.size[1], :self.size[2]]
         dist_from_center = np.sqrt((x - center[2])**2 + (y - center[1])**2 + (z - center[0])**2)
 
-        self.cytoplasm = dist_from_center <= radius
+        # Create cell membrane
         self.membrane = (dist_from_center <= radius + 1) & (dist_from_center > radius)
-        self.nucleus = dist_from_center <= radius // 2
 
-    def add_protein(self, name: str, initial_concentration: np.ndarray, diffusion_coefficient: float):
-        if initial_concentration.shape != self.size:
-            raise ValueError("Protein concentration array must match cell size")
-        self.proteins[name] = initial_concentration
-        self.diffusion_coefficients[name] = diffusion_coefficient
+        # Create cytoplasm
+        self.cytoplasm = dist_from_center <= radius
+
+        # Create nucleus (smaller than the cell)
+        nucleus_radius = radius // 2
+        self.nucleus = dist_from_center <= nucleus_radius
+
+        # Create ER (between nucleus and cell membrane)
+        er_mask = (dist_from_center > nucleus_radius + 1) & (dist_from_center < radius - 1)
+        self.er = er_mask & (np.random.rand(*self.size) < 0.2)  # 20% density
 
     def update_protein_diffusion(self, dt: float):
         for name, concentration in self.proteins.items():
@@ -533,6 +544,7 @@ class BiologicalSimulator:
         else:
             return None
 
+
     def generate_er(self, cell_shape, soma_center, nucleus_radius, er_density=0.1, pixel_size=(1,1,1)):
         try:
             self.logger.info(f"Generating ER with density {er_density}")
@@ -948,3 +960,159 @@ class BiologicalSimulator:
         z, y, x = np.ogrid[:self.size[0], :self.size[1], :self.size[2]]
         r2 = ((z-center[0])**2 + (y-center[1])**2 + (x-center[2])**2) / (2*spread**2)
         return amplitude * np.exp(-r2)
+
+##########################################################################################
+################## Shape Simulator   (for testing)      ##################################
+##########################################################################################
+class Shape(ABC):
+    def __init__(self, position, size, color):
+        self.position = np.array(position, dtype=float)
+        self.size = size
+        self.color = color
+
+    @abstractmethod
+    def get_vertices(self):
+        pass
+
+    @abstractmethod
+    def get_faces(self):
+        pass
+
+    @abstractmethod
+    def get_volume_points(self, resolution=10):
+        pass
+
+class Sphere(Shape):
+    def get_volume_points(self, resolution=10):
+        r = self.size / 2
+        x, y, z = np.ogrid[-r:r:resolution*1j, -r:r:resolution*1j, -r:r:resolution*1j]
+        mask = x**2 + y**2 + z**2 <= r**2
+        points = np.column_stack(np.where(mask))
+        return points + self.position
+
+    def get_vertices(self):
+        # Create a simple sphere approximation
+        u = np.linspace(0, 2 * np.pi, 20)
+        v = np.linspace(0, np.pi, 10)
+        x = self.size * np.outer(np.cos(u), np.sin(v))
+        y = self.size * np.outer(np.sin(u), np.sin(v))
+        z = self.size * np.outer(np.ones(np.size(u)), np.cos(v))
+        vertices = np.stack((x.flatten(), y.flatten(), z.flatten()), axis=-1)
+        return vertices + self.position
+
+    def get_faces(self):
+        # This is a simplified face generation and might not be perfect
+        u = 20
+        v = 10
+        faces = []
+        for i in range(u - 1):
+            for j in range(v - 1):
+                faces.append([i*v + j, (i+1)*v + j, i*v + (j+1)])
+                faces.append([(i+1)*v + j, (i+1)*v + (j+1), i*v + (j+1)])
+        return np.array(faces)
+
+class Cube(Shape):
+    def get_volume_points(self, resolution=10):
+        s = self.size
+        x, y, z = np.mgrid[0:s:resolution*1j, 0:s:resolution*1j, 0:s:resolution*1j]
+        points = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
+        return points + self.position - s/2
+
+    def get_vertices(self):
+        s = self.size / 2
+        vertices = np.array([
+            [-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s],
+            [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s]
+        ])
+        return vertices + self.position
+
+    def get_faces(self):
+        return np.array([
+            [0, 1, 2], [0, 2, 3],  # front
+            [1, 5, 6], [1, 6, 2],  # right
+            [5, 4, 7], [5, 7, 6],  # back
+            [4, 0, 3], [4, 3, 7],  # left
+            [3, 2, 6], [3, 6, 7],  # top
+            [4, 5, 1], [4, 1, 0],  # bottom
+        ])
+
+class Movement(ABC):
+    @abstractmethod
+    def update(self, shape, dt):
+        pass
+
+class RandomWalk(Movement):
+    def __init__(self, speed):
+        self.speed = speed
+
+    def update(self, shape, dt):
+        shape.position += np.random.normal(0, self.speed * dt, 3)
+
+class LinearMotion(Movement):
+    def __init__(self, velocity):
+        self.velocity = np.array(velocity)
+
+    def update(self, shape, dt):
+        shape.position += self.velocity * dt
+
+class Interaction(ABC):
+    @abstractmethod
+    def apply(self, shape1, shape2):
+        pass
+
+class Attraction(Interaction):
+    def __init__(self, strength):
+        self.strength = strength
+
+    def apply(self, shape1, shape2):
+        direction = shape2.position - shape1.position
+        force = self.strength * direction / np.linalg.norm(direction)
+        shape1.position += force
+        shape2.position -= force
+
+class Repulsion(Interaction):
+    def __init__(self, strength, range):
+        self.strength = strength
+        self.range = range
+
+    def apply(self, shape1, shape2):
+        direction = shape2.position - shape1.position
+        distance = np.linalg.norm(direction)
+        if distance < self.range:
+            force = self.strength * (self.range - distance) * direction / distance
+            shape1.position -= force
+            shape2.position += force
+
+class ShapeSimulator:
+    def __init__(self, size):
+        self.size = size
+        self.shapes = []
+        self.movements = {}
+        self.interactions = []
+
+    def add_shape(self, shape, movement=None):
+        self.shapes.append(shape)
+        if movement:
+            self.movements[shape] = movement
+
+    def add_interaction(self, interaction):
+        self.interactions.append(interaction)
+
+    def update(self, dt):
+        for shape, movement in self.movements.items():
+            movement.update(shape, dt)
+
+        for i, shape1 in enumerate(self.shapes):
+            for shape2 in self.shapes[i+1:]:
+                for interaction in self.interactions:
+                    interaction.apply(shape1, shape2)
+
+    def get_state(self, resolution=10):
+        state = np.zeros(self.size, dtype=bool)
+        for shape in self.shapes:
+            points = shape.get_volume_points(resolution)
+            indices = np.round(points).astype(int)
+            valid_indices = np.all((indices >= 0) & (indices < np.array(self.size)), axis=1)
+            valid_indices = indices[valid_indices]
+            state[valid_indices[:, 0], valid_indices[:, 1], valid_indices[:, 2]] = True
+        return state

@@ -13,6 +13,108 @@ import tifffile
 from scipy.ndimage import rotate
 from typing import Tuple, List, Optional, Any, Dict
 
+from file_operations import ImporterFactory
+
+class DataManager:
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.data = None
+        self.metadata = {}
+        self.data_generator = DataGenerator()
+
+    def generate_data(self, params):
+        try:
+            if params['structured_data']:
+                self.data = self.generate_structured_data(params)
+            else:
+                self.data = self.generate_unstructured_data(params)
+
+            self.log_data_info()
+            return self.data
+        except Exception as e:
+            self.logger.error(f"Error in data generation: {str(e)}")
+            raise
+
+    def generate_structured_data(self, params):
+        channel_ranges = params.get('channel_ranges', [])
+        return self.data_generator.generate_structured_multi_channel_time_series(
+            num_volumes=params['num_volumes'],
+            num_channels=params['num_channels'],
+            size=params['size'],
+            num_blobs=params['num_blobs'],
+            intensity_range=(0.8, 1.0),
+            sigma_range=(2, 6),
+            noise_level=params['noise_level'],
+            movement_speed=params['movement_speed'],
+            channel_ranges=channel_ranges
+        )
+
+    def generate_unstructured_data(self, params):
+        return self.data_generator.generate_multi_channel_time_series(
+            num_volumes=params['num_volumes'],
+            num_channels=params['num_channels'],
+            size=params['size'],
+            num_blobs=params['num_blobs'],
+            intensity_range=(0.8, 1.0),
+            sigma_range=(2, 6),
+            noise_level=params['noise_level'],
+            movement_speed=params['movement_speed']
+        )
+
+    def log_data_info(self):
+        self.logger.info(f"Generated data shape: {self.data.shape}")
+        self.logger.info(f"Data min: {self.data.min()}, max: {self.data.max()}, mean: {self.data.mean()}")
+
+    def load_data(self, filename):
+        try:
+            if filename.endswith('.tiff'):
+                self.data = self.data_generator.load_tiff(filename)
+            elif filename.endswith('.npy'):
+                self.data = self.data_generator.load_numpy(filename)
+            else:
+                raise ValueError("Unsupported file format")
+
+            self.log_data_info()
+            return self.data
+        except Exception as e:
+            self.logger.error(f"Error loading data: {str(e)}")
+            raise
+
+    def save_data(self, filename):
+        try:
+            if filename.endswith('.tiff'):
+                self.data_generator.save_tiff(filename)
+            elif filename.endswith('.npy'):
+                self.data_generator.save_numpy(filename)
+            else:
+                raise ValueError("Unsupported file format")
+
+            self.logger.info(f"Data saved to {filename}")
+        except Exception as e:
+            self.logger.error(f"Error saving data: {str(e)}")
+            raise
+
+    def import_microscope_data(self, file_path):
+        try:
+            importer = ImporterFactory.get_importer(file_path)
+            self.metadata = importer.read_metadata()
+            self.data = importer.read_data()
+
+            if self.data is None:
+                raise ValueError("Failed to read data from the file.")
+
+            self.log_data_info()
+            return self.data, self.metadata
+        except Exception as e:
+            self.logger.error(f"Error importing microscope data: {str(e)}")
+            raise
+
+    def get_data(self):
+        return self.data
+
+    def get_metadata(self):
+        return self.metadata
+
 
 class DataGenerator:
     def __init__(self):
@@ -156,50 +258,32 @@ class DataGenerator:
 
 
 
-    def generate_structured_multi_channel_time_series(self, num_volumes, num_channels=2, size=(30, 100, 100),
-                                                      num_blobs=30, intensity_range=(0.5, 1.0), sigma_range=(2, 6),
-                                                      noise_level=0.02, movement_speed=1.0, channel_ranges=None):
+    def generate_structured_multi_channel_time_series(self, num_volumes, num_channels, size, num_blobs,
+                                                      intensity_range, sigma_range, noise_level, movement_speed,
+                                                      channel_ranges):
         z, y, x = size
         time_series = np.zeros((num_volumes, num_channels, z, y, x))
 
-        if channel_ranges is None:
-            channel_ranges = [((0, x), (0, y), (0, z)) for _ in range(num_channels)]
-
-        blob_positions = []
-        blob_velocities = []
-
         for c in range(num_channels):
-            x_range, y_range, z_range = channel_ranges[c]
-            channel_blobs = np.random.rand(num_blobs, 3)
-            channel_blobs[:, 0] = channel_blobs[:, 0] * (x_range[1] - x_range[0]) + x_range[0]
-            channel_blobs[:, 1] = channel_blobs[:, 1] * (y_range[1] - y_range[0]) + y_range[0]
-            channel_blobs[:, 2] = channel_blobs[:, 2] * (z_range[1] - z_range[0]) + z_range[0]
-            blob_positions.append(channel_blobs)
-            blob_velocities.append(np.random.randn(num_blobs, 3) * movement_speed)
+            x_range, y_range, z_range = channel_ranges[c] if c < len(channel_ranges) else ((0, x), (0, y), (0, z))
+            blob_positions = np.random.rand(num_blobs, 3)
+            blob_positions[:, 0] = blob_positions[:, 0] * (x_range[1] - x_range[0]) + x_range[0]
+            blob_positions[:, 1] = blob_positions[:, 1] * (y_range[1] - y_range[0]) + y_range[0]
+            blob_positions[:, 2] = blob_positions[:, 2] * (z_range[1] - z_range[0]) + z_range[0]
+            blob_velocities = np.random.randn(num_blobs, 3) * movement_speed
 
-        for t in range(num_volumes):
-            for c in range(num_channels):
-                volume = np.zeros((z, y, x))
-                x_range, y_range, z_range = channel_ranges[c]
-                for i in range(num_blobs):
-                    bx, by, bz = blob_positions[c][i]
-                    sigma = np.random.uniform(*sigma_range)
-                    intensity = np.random.uniform(*intensity_range)
+            for t in range(num_volumes):
+                volume = self._generate_single_volume(
+                    size, blob_positions, blob_velocities,
+                    intensity_range, sigma_range, noise_level
+                )
+                time_series[t, c] = volume
 
-                    xx, yy, zz = np.ogrid[max(0, int(bx-3*sigma)):min(x, int(bx+3*sigma)),
-                                          max(0, int(by-3*sigma)):min(y, int(by+3*sigma)),
-                                          max(0, int(bz-3*sigma)):min(z, int(bz+3*sigma))]
-                    blob = np.exp(-((xx-bx)**2 + (yy-by)**2 + (zz-bz)**2) / (2*sigma*sigma))
-                    volume[zz, yy, xx] += intensity * blob
-
-                    # Update blob position
-                    blob_positions[c][i] += blob_velocities[c][i]
-                    blob_positions[c][i][0] = np.clip(blob_positions[c][i][0], x_range[0], x_range[1])
-                    blob_positions[c][i][1] = np.clip(blob_positions[c][i][1], y_range[0], y_range[1])
-                    blob_positions[c][i][2] = np.clip(blob_positions[c][i][2], z_range[0], z_range[1])
-
-                volume += np.random.normal(0, noise_level, (z, y, x))
-                time_series[t, c] = np.clip(volume, 0, 1)
+                # Update blob positions
+                blob_positions += blob_velocities
+                blob_positions[:, 0] = np.clip(blob_positions[:, 0], x_range[0], x_range[1])
+                blob_positions[:, 1] = np.clip(blob_positions[:, 1], y_range[0], y_range[1])
+                blob_positions[:, 2] = np.clip(blob_positions[:, 2], z_range[0], z_range[1])
 
         return time_series
 

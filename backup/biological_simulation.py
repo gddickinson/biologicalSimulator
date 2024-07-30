@@ -6,13 +6,61 @@ Created on Wed Jul 24 07:09:57 2024
 @author: george
 """
 
-
 import numpy as np
 import logging
 from typing import Tuple, List, Optional, Any, Dict
 from skimage.morphology import skeletonize
 from scipy.ndimage import center_of_mass, binary_dilation, gaussian_filter
 from scipy.spatial.distance import cdist
+from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import label
+from skimage.morphology import skeletonize
+from scipy.spatial import  cKDTree
+from scipy.spatial.transform import Rotation
+from abc import ABC, abstractmethod
+
+
+'''Basic organelle info'''
+'''Within the cytoplasm, the major organelles and cellular structures include: (1) nucleolus (2) nucleus (3) ribosome (4) vesicle (5) rough endoplasmic reticulum (6) Golgi apparatus (7) cytoskeleton (8) smooth endoplasmic reticulum (9) mitochondria (10) vacuole (11) cytosol (12) lysosome (13) centriole'''
+
+'''The endoplasmic reticulum (ER) is a netlike labyrinth of tubules and sacs that extends throughout the cytosol of a cell. It's interconnected with other organelles, such as the Golgi apparatus, mitochondria, and nucleus, through membrane contacts and vesicle transport. These connections allow for the exchange of materials and signals between different cellular compartments.'''
+
+'''The nucleus of a cell is surrounded by a nuclear envelope, which is made up of two concentric membranes: the inner and outer nuclear membranes. The space between the two membranes is called the perinuclear space, and it's directly connected to the endoplasmic reticulum's lumen:
+Outer nuclear membrane
+Continuous with the endoplasmic reticulum, this membrane has ribosomes attached to its cytoplasmic surface and is functionally similar to the endoplasmic reticulum's membranes.
+Inner nuclear membrane
+Surrounds the nucleus's contents and has unique proteins attached to it that are specific to the nucleus. Embedded within the inner membrane are proteins that bind to intermediate filaments, which give the nucleus its structure.'''
+
+'''Mitochondria are organelles that interact with other organelles in the cell to regulate energy metabolism, biosynthesis, immune response, and cell turnover. These interactions occur through membrane contact sites (MCSs), signal transduction, and vesicle transport. Mitochondria form MCSs with almost every other organelle, including:
+Endoplasmic reticulum (ER), Lipid droplets, Lysosomes, Golgi apparatus, Melanosomes, Peroxisomes, Cytoskeleton, and Nucleus.'''
+
+'''The plasma membrane is a semi-permeable barrier that separates the inside and outside of a cell, and it's made up of lipids and proteins. The membrane's fundamental structure is a phospholipid bilayer, which is made up of lipid molecules with two fatty acid chains and a phosphate-containing group. Proteins are embedded within the bilayer and perform specific functions, such as transporting molecules and recognizing other cells. The plasma membrane also connects to other organelles through vesicular transport, which exchanges membrane components like proteins and lipids. Molecular tags help direct the components to their proper destinations. For example, the endoplasmic reticulum (ER) is a large, continuous membrane-bound organelle that's found in the cytoplasm of eukaryotic cells. The ER has many distinct domains, including the plasma membrane, and it can form abundant contacts with the plasma membrane in cell bodies, as well as smaller contacts in other areas. These contacts are bridged by tethering molecules that can be constant or dynamically regulated to perform different functions.'''
+
+'''The Golgi apparatus interacts with other organelles in the cell through molecules that are transported into or out of it. The Golgi is part of the endomembrane system, which also includes the endoplasmic reticulum (ER) and lysosomes, and these organelles have close relationships with the Golgi:
+Lysosomes
+The Golgi is responsible for forming lysosomes when vesicles bud off from the trans-Golgi and fuse with endosomes. The ER also contributes to lysosomal formation by synthesizing lysosomal hydrolases, which are then transported to the Golgi and tagged for the lysosomes. Golgi–lysosome contact may regulate signaling and the comovement of these organelles, and their interplay may play a role in cancer and neurodegenerative diseases.
+Endosomes
+The Golgi sorts newly synthesized proteins for transport to other endomembrane organelles, including endosomes.
+ER
+The Golgi and ER have a bidirectional relationship that helps coordinate signal transduction between organelles during cell remodeling.
+N-ethylmaleimide-sensitive factor (NSF)
+NSF is closely related to endothelial nitric oxide synthase (eNOS), which is mainly located in the Golgi apparatus. NSF reduces the speed of protein transport from the Golgi to the plasma membrane.'''
+
+'''The cytoskeleton is made up of microtubules, actin filaments, and intermediate filaments, which form an interconnected network. This network can exert and transmit mechanical forces to other cellular components, such as organelles, which can modify their function and morphology. The cytoskeleton also remodels membrane-bound organelles, and in turn, dynamic membrane-bound organelles can contribute to cytoskeletal organization. These complex interactions between the cytoskeleton and organelles play important roles in their transport, organization, and dynamics, which are essential for maintaining cellular homeostasis. Microtubules
+These can connect to other microtubules or organelles using lateral appendages. Microtubule motors can also attach to vesicles and move along microtubules to pull them.
+Microfilaments
+These help structure the cytoplasm and movement. Proteins can bind to actin filaments to regulate their formation and function.
+Intermediate filaments
+These have structural functions, such as bearing tension to maintain cell shape and anchoring organelles in place. '''
+
+'''Ribosomes are organelles that can interact with other organelles in several ways, including:
+Endoplasmic reticulum (ER)
+When ribosomes synthesize proteins for the ER or for export from the cell, they can attach to the ER, giving it a rough appearance. This process is called vectorial synthesis, and the ribosomes bind to the ER's translocon site. The ribosomes are not permanent parts of the ER's structure, and they are constantly being released and reattached to the membrane.
+Ribosome-associated vesicles (RAVs)
+These organelles interact with mitochondria through direct membrane contact, which helps the ER and its derivatives communicate with other organelles.
+Nuclear envelope
+The nuclear envelope has a thin space between its two layers that's directly connected to the ER's interior. Small channels called nuclear pores span the nuclear envelope, allowing substances to pass in and out of the nucleus. '''
+
 
 class Cell:
     def __init__(self, size: Tuple[int, int, int], position: Tuple[float, float, float]):
@@ -21,7 +69,7 @@ class Cell:
         self.membrane = np.zeros(size, dtype=bool)
         self.nucleus = np.zeros(size, dtype=bool)
         self.cytoplasm = np.zeros(size, dtype=bool)
-        self.organelles = {}
+        self.er = np.zeros(size, dtype=bool)
         self.proteins = {}
         self.diffusion_coefficients = {}
         self.initialize_structures()
@@ -33,15 +81,19 @@ class Cell:
         z, y, x = np.ogrid[:self.size[0], :self.size[1], :self.size[2]]
         dist_from_center = np.sqrt((x - center[2])**2 + (y - center[1])**2 + (z - center[0])**2)
 
-        self.cytoplasm = dist_from_center <= radius
+        # Create cell membrane
         self.membrane = (dist_from_center <= radius + 1) & (dist_from_center > radius)
-        self.nucleus = dist_from_center <= radius // 2
 
-    def add_protein(self, name: str, initial_concentration: np.ndarray, diffusion_coefficient: float):
-        if initial_concentration.shape != self.size:
-            raise ValueError("Protein concentration array must match cell size")
-        self.proteins[name] = initial_concentration
-        self.diffusion_coefficients[name] = diffusion_coefficient
+        # Create cytoplasm
+        self.cytoplasm = dist_from_center <= radius
+
+        # Create nucleus (smaller than the cell)
+        nucleus_radius = radius // 2
+        self.nucleus = dist_from_center <= nucleus_radius
+
+        # Create ER (between nucleus and cell membrane)
+        er_mask = (dist_from_center > nucleus_radius + 1) & (dist_from_center < radius - 1)
+        self.er = er_mask & (np.random.rand(*self.size) < 0.2)  # 20% density
 
     def update_protein_diffusion(self, dt: float):
         for name, concentration in self.proteins.items():
@@ -425,7 +477,7 @@ class BiologicalSimulator:
             self.logger.info(f"Generating cell nucleus at {soma_center} with radius {nucleus_radius}")
 
             # Ensure nucleus_radius is at least 1 pixel and not larger than 1/3 of the soma
-            soma_radius = min(self.size) // 4
+            soma_radius = min(cell_interior.shape) // 4
             nucleus_radius = min(max(1, nucleus_radius), soma_radius)
 
             # Find a suitable center for the nucleus
@@ -436,7 +488,7 @@ class BiologicalSimulator:
                 return np.zeros_like(cell_interior), soma_center
 
             # Create a spherical nucleus
-            z, y, x = np.ogrid[:self.size[0], :self.size[1], :self.size[2]]
+            z, y, x = np.ogrid[:cell_interior.shape[0], :cell_interior.shape[1], :cell_interior.shape[2]]
             dist_from_center = np.sqrt(
                 ((z - new_center[0]) * pixel_size[0])**2 +
                 ((y - new_center[1]) * pixel_size[1])**2 +
@@ -447,7 +499,7 @@ class BiologicalSimulator:
             nucleus = (dist_from_center <= nucleus_radius) & (cell_interior > 0)
 
             actual_volume = np.sum(nucleus)
-            self.nucleus = nucleus
+            self.nucleus = nucleus.astype(float)
             self.logger.info(f"Cell nucleus generated successfully. Nucleus volume: {actual_volume}")
             return nucleus.astype(float), new_center
 
@@ -456,16 +508,16 @@ class BiologicalSimulator:
             raise
 
     def find_suitable_center(self, cell_shape, soma_center, nucleus_radius):
-        z, y, x = np.ogrid[:self.size[0], :self.size[1], :self.size[2]]
+        z, y, x = np.ogrid[:cell_shape.shape[0], :cell_shape.shape[1], :cell_shape.shape[2]]
         dist_from_center = np.sqrt(
             (z - soma_center[0])**2 + (y - soma_center[1])**2 + (x - soma_center[2])**2
         )
 
         # Create a priority map that favors locations closer to the desired center
-        priority_map = np.where(cell_shape, -dist_from_center, -np.inf)
+        priority_map = np.where(cell_shape > 0, -dist_from_center, -np.inf)
 
         search_radius = 0
-        max_search_radius = max(self.size)
+        max_search_radius = max(cell_shape.shape)
         while search_radius < max_search_radius:
             potential_centers = np.argwhere(
                 (dist_from_center <= search_radius) & (cell_shape > 0)
@@ -477,7 +529,7 @@ class BiologicalSimulator:
 
                 for center in sorted_centers:
                     # Check if the chosen center can accommodate the nucleus
-                    z, y, x = np.ogrid[:self.size[0], :self.size[1], :self.size[2]]
+                    z, y, x = np.ogrid[:cell_shape.shape[0], :cell_shape.shape[1], :cell_shape.shape[2]]
                     dist_from_center = np.sqrt(
                         (z - center[0])**2 + (y - center[1])**2 + (x - center[2])**2
                     )
@@ -492,11 +544,12 @@ class BiologicalSimulator:
         else:
             return None
 
+
     def generate_er(self, cell_shape, soma_center, nucleus_radius, er_density=0.1, pixel_size=(1,1,1)):
         try:
             self.logger.info(f"Generating ER with density {er_density}")
 
-            z, y, x = np.ogrid[:self.size[0], :self.size[1], :self.size[2]]
+            z, y, x = np.ogrid[:cell_shape.shape[0], :cell_shape.shape[1], :cell_shape.shape[2]]
             dist_from_center = np.sqrt(
                 ((z - soma_center[0]) * pixel_size[0])**2 +
                 ((y - soma_center[1]) * pixel_size[1])**2 +
@@ -511,14 +564,14 @@ class BiologicalSimulator:
             self.logger.info(f"Cell volume: {np.sum(cell_mask)}, Nucleus volume: {np.sum(nucleus_mask)}, Cytoplasm volume: {np.sum(cytoplasm_mask)}")
 
             # Initialize ER
-            er = np.zeros(self.size, dtype=bool)
+            er = np.zeros_like(cell_shape, dtype=bool)
 
             # Generate ER throughout the cytoplasm
-            er = cytoplasm_mask & (np.random.rand(*self.size) < er_density)
+            er = cytoplasm_mask & (np.random.rand(*cell_shape.shape) < er_density)
 
             # Ensure higher ER density near the nucleus
             near_nucleus = (dist_from_center > nucleus_radius) & (dist_from_center <= nucleus_radius * 1.5)
-            er |= near_nucleus & cytoplasm_mask & (np.random.rand(*self.size) < er_density * 2)
+            er |= near_nucleus & cytoplasm_mask & (np.random.rand(*cell_shape.shape) < er_density * 2)
             self.er = er
             self.logger.info(f"ER generated successfully. ER volume: {np.sum(er)}")
             return er.astype(float)
@@ -630,16 +683,48 @@ class BiologicalSimulator:
                 cell_shape = cell_membrane | cell_interior
 
             elif cell_type == 'muscle':
-                outer_shape = ((y - soma_center[1])*pixel_size[1])**2 + ((z - soma_center[0])*pixel_size[0])**2 <= (min(size)//4)**2
-                inner_shape = ((y - soma_center[1])*pixel_size[1])**2 + ((z - soma_center[0])*pixel_size[0])**2 <= (min(size)//4 - membrane_thickness)**2
-                cell_shape = outer_shape ^ inner_shape
+                # Ensure size is a tuple of integers
+                z, y, x = [int(s[0] if isinstance(s, np.ndarray) else s) for s in size]
+                size = (z, y, x)
+                soma_center = np.array(size) // 2
+
+                self.logger.info(f"Muscle cell size: z={z}, y={y}, x={x}")
+
+                # Create a cylindrical shape for the muscle cell
+                radius = min(y, z) // 4
+                length = x
+
+                # Create the main body of the muscle cell
+                zz, yy, xx = np.ogrid[:z, :y, :x]
+                cell_shape = (((yy - y//2)*pixel_size[1])**2 + ((zz - z//2)*pixel_size[0])**2 <= radius**2).astype(float)
+
+                # Create a tapering function
+                taper = np.linspace(0.7, 1, length//2)
+                taper = np.concatenate([taper, taper[::-1]])
+
+                # Apply tapering
+                taper_3d = taper[np.newaxis, np.newaxis, :]
+                cell_shape = cell_shape * taper_3d
+
+                # Create the cell interior (slightly smaller than the full shape)
+                cell_interior = (((yy - y//2)*pixel_size[1])**2 + ((zz - z//2)*pixel_size[0])**2 <= (radius - membrane_thickness)**2).astype(float)
+                cell_interior = cell_interior * taper_3d
+
+                # Create the cell membrane
+                cell_membrane = (cell_shape > 0) & (cell_interior == 0)
+
+                # Convert to float
+                cell_shape = cell_shape.astype(float)
+                cell_interior = cell_interior.astype(float)
+                cell_membrane = cell_membrane.astype(float)
+
 
             else:
                 raise ValueError(f"Unknown cell type: {cell_type}")
 
             non_zero_coords = np.argwhere(cell_shape > 0)
             self.logger.info(f"Non-zero cell shape coordinates: min={non_zero_coords.min(axis=0)}, max={non_zero_coords.max(axis=0)}")
-            self.cell_shape = cell_shape
+            self.cell_shape = cell_shape.astype(float)
             self.logger.info(f"{cell_type} cell shape generated successfully")
             return cell_shape.astype(float), cell_interior.astype(float), cell_membrane.astype(float)
 
@@ -659,17 +744,27 @@ class BiologicalSimulator:
             if self.cell_shape is None or self.nucleus is None:
                 raise ValueError("Cell shape and nucleus must be generated before mitochondria")
 
-            cytoplasm = self.cell_shape & ~self.nucleus
-            mitochondria = np.zeros_like(self.cell_shape)
+            # Convert float arrays to boolean
+            cell_shape_bool = self.cell_shape > 0
+            nucleus_bool = self.nucleus > 0
+            cytoplasm = cell_shape_bool & ~nucleus_bool
+            mitochondria = np.zeros_like(self.cell_shape, dtype=bool)
+
+            # Get the actual size of the cell shape
+            z_size, y_size, x_size = cytoplasm.shape
 
             generated_count = 0
             for _ in range(num_mitochondria):
                 radius = np.random.uniform(size_range[0]/2, size_range[1]/2)
-                pos = tuple(np.random.randint(0, s) for s in self.size)
+                pos = (np.random.randint(0, z_size),
+                       np.random.randint(0, y_size),
+                       np.random.randint(0, x_size))
 
                 attempts = 0
                 while not cytoplasm[pos] and attempts < 100:
-                    pos = tuple(np.random.randint(0, s) for s in self.size)
+                    pos = (np.random.randint(0, z_size),
+                           np.random.randint(0, y_size),
+                           np.random.randint(0, x_size))
                     attempts += 1
 
                 if attempts == 100:
@@ -682,9 +777,9 @@ class BiologicalSimulator:
                 sz, sy, sx = sphere.shape
                 pz, py, px = pos
 
-                z_start, z_end = max(0, pz-int(radius)), min(self.size[0], pz+int(radius)+1)
-                y_start, y_end = max(0, py-int(radius)), min(self.size[1], py+int(radius)+1)
-                x_start, x_end = max(0, px-int(radius)), min(self.size[2], px+int(radius)+1)
+                z_start, z_end = max(0, pz-int(radius)), min(z_size, pz+int(radius)+1)
+                y_start, y_end = max(0, py-int(radius)), min(y_size, py+int(radius)+1)
+                x_start, x_end = max(0, px-int(radius)), min(x_size, px+int(radius)+1)
 
                 mito_slice = mitochondria[z_start:z_end, y_start:y_end, x_start:x_end]
                 sphere_slice = sphere[:mito_slice.shape[0], :mito_slice.shape[1], :mito_slice.shape[2]]
@@ -705,7 +800,6 @@ class BiologicalSimulator:
             raise
 
 
-
     def generate_cytoskeleton(self, actin_density: float = 0.05, microtubule_density: float = 0.02):
         try:
             self.logger.info("Generating cytoskeleton")
@@ -713,7 +807,10 @@ class BiologicalSimulator:
             if self.cell_shape is None or self.nucleus is None:
                 raise ValueError("Cell shape and nucleus must be generated before cytoskeleton")
 
-            cytoplasm = self.cell_shape & ~self.nucleus
+            # Convert float arrays to boolean
+            cell_shape_bool = self.cell_shape > 0
+            nucleus_bool = self.nucleus > 0
+            cytoplasm = cell_shape_bool & ~nucleus_bool
 
             # Generate actin filaments
             actin = np.random.rand(*self.size) < actin_density
@@ -721,7 +818,7 @@ class BiologicalSimulator:
             actin = skeletonize(actin)
 
             # Generate microtubules
-            microtubules = np.zeros_like(self.cell_shape)
+            microtubules = np.zeros_like(self.cell_shape, dtype=bool)
             center = np.array(self.nucleus.shape) // 2
             num_microtubules = int(microtubule_density * np.sum(cytoplasm))
 
@@ -735,7 +832,7 @@ class BiologicalSimulator:
                 vv = np.clip(vv, 0, self.size[2] - 1)
 
                 valid = cytoplasm[rr, cc, vv]
-                microtubules[rr[valid], cc[valid], vv[valid]] = 1
+                microtubules[rr[valid], cc[valid], vv[valid]] = True
 
             microtubules = skeletonize(microtubules)
             microtubules &= cytoplasm  # Ensure microtubules don't enter the nucleus
@@ -863,3 +960,159 @@ class BiologicalSimulator:
         z, y, x = np.ogrid[:self.size[0], :self.size[1], :self.size[2]]
         r2 = ((z-center[0])**2 + (y-center[1])**2 + (x-center[2])**2) / (2*spread**2)
         return amplitude * np.exp(-r2)
+
+##########################################################################################
+################## Shape Simulator   (for testing)      ##################################
+##########################################################################################
+class Shape(ABC):
+    def __init__(self, position, size, color):
+        self.position = np.array(position, dtype=float)
+        self.size = size
+        self.color = color
+
+    @abstractmethod
+    def get_vertices(self):
+        pass
+
+    @abstractmethod
+    def get_faces(self):
+        pass
+
+    @abstractmethod
+    def get_volume_points(self, resolution=10):
+        pass
+
+class Sphere(Shape):
+    def get_volume_points(self, resolution=10):
+        r = self.size / 2
+        x, y, z = np.ogrid[-r:r:resolution*1j, -r:r:resolution*1j, -r:r:resolution*1j]
+        mask = x**2 + y**2 + z**2 <= r**2
+        points = np.column_stack(np.where(mask))
+        return points + self.position
+
+    def get_vertices(self):
+        # Create a simple sphere approximation
+        u = np.linspace(0, 2 * np.pi, 20)
+        v = np.linspace(0, np.pi, 10)
+        x = self.size * np.outer(np.cos(u), np.sin(v))
+        y = self.size * np.outer(np.sin(u), np.sin(v))
+        z = self.size * np.outer(np.ones(np.size(u)), np.cos(v))
+        vertices = np.stack((x.flatten(), y.flatten(), z.flatten()), axis=-1)
+        return vertices + self.position
+
+    def get_faces(self):
+        # This is a simplified face generation and might not be perfect
+        u = 20
+        v = 10
+        faces = []
+        for i in range(u - 1):
+            for j in range(v - 1):
+                faces.append([i*v + j, (i+1)*v + j, i*v + (j+1)])
+                faces.append([(i+1)*v + j, (i+1)*v + (j+1), i*v + (j+1)])
+        return np.array(faces)
+
+class Cube(Shape):
+    def get_volume_points(self, resolution=10):
+        s = self.size
+        x, y, z = np.mgrid[0:s:resolution*1j, 0:s:resolution*1j, 0:s:resolution*1j]
+        points = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
+        return points + self.position - s/2
+
+    def get_vertices(self):
+        s = self.size / 2
+        vertices = np.array([
+            [-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s],
+            [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s]
+        ])
+        return vertices + self.position
+
+    def get_faces(self):
+        return np.array([
+            [0, 1, 2], [0, 2, 3],  # front
+            [1, 5, 6], [1, 6, 2],  # right
+            [5, 4, 7], [5, 7, 6],  # back
+            [4, 0, 3], [4, 3, 7],  # left
+            [3, 2, 6], [3, 6, 7],  # top
+            [4, 5, 1], [4, 1, 0],  # bottom
+        ])
+
+class Movement(ABC):
+    @abstractmethod
+    def update(self, shape, dt):
+        pass
+
+class RandomWalk(Movement):
+    def __init__(self, speed):
+        self.speed = speed
+
+    def update(self, shape, dt):
+        shape.position += np.random.normal(0, self.speed * dt, 3)
+
+class LinearMotion(Movement):
+    def __init__(self, velocity):
+        self.velocity = np.array(velocity)
+
+    def update(self, shape, dt):
+        shape.position += self.velocity * dt
+
+class Interaction(ABC):
+    @abstractmethod
+    def apply(self, shape1, shape2):
+        pass
+
+class Attraction(Interaction):
+    def __init__(self, strength):
+        self.strength = strength
+
+    def apply(self, shape1, shape2):
+        direction = shape2.position - shape1.position
+        force = self.strength * direction / np.linalg.norm(direction)
+        shape1.position += force
+        shape2.position -= force
+
+class Repulsion(Interaction):
+    def __init__(self, strength, range):
+        self.strength = strength
+        self.range = range
+
+    def apply(self, shape1, shape2):
+        direction = shape2.position - shape1.position
+        distance = np.linalg.norm(direction)
+        if distance < self.range:
+            force = self.strength * (self.range - distance) * direction / distance
+            shape1.position -= force
+            shape2.position += force
+
+class ShapeSimulator:
+    def __init__(self, size):
+        self.size = size
+        self.shapes = []
+        self.movements = {}
+        self.interactions = []
+
+    def add_shape(self, shape, movement=None):
+        self.shapes.append(shape)
+        if movement:
+            self.movements[shape] = movement
+
+    def add_interaction(self, interaction):
+        self.interactions.append(interaction)
+
+    def update(self, dt):
+        for shape, movement in self.movements.items():
+            movement.update(shape, dt)
+
+        for i, shape1 in enumerate(self.shapes):
+            for shape2 in self.shapes[i+1:]:
+                for interaction in self.interactions:
+                    interaction.apply(shape1, shape2)
+
+    def get_state(self, resolution=10):
+        state = np.zeros(self.size, dtype=bool)
+        for shape in self.shapes:
+            points = shape.get_volume_points(resolution)
+            indices = np.round(points).astype(int)
+            valid_indices = np.all((indices >= 0) & (indices < np.array(self.size)), axis=1)
+            valid_indices = indices[valid_indices]
+            state[valid_indices[:, 0], valid_indices[:, 1], valid_indices[:, 2]] = True
+        return state

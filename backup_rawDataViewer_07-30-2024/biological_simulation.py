@@ -16,6 +16,9 @@ from scipy.ndimage import distance_transform_edt
 from scipy.ndimage import label
 from skimage.morphology import skeletonize
 from scipy.spatial import  cKDTree
+from scipy.spatial.transform import Rotation
+from abc import ABC, abstractmethod
+
 
 '''Basic organelle info'''
 '''Within the cytoplasm, the major organelles and cellular structures include: (1) nucleolus (2) nucleus (3) ribosome (4) vesicle (5) rough endoplasmic reticulum (6) Golgi apparatus (7) cytoskeleton (8) smooth endoplasmic reticulum (9) mitochondria (10) vacuole (11) cytosol (12) lysosome (13) centriole'''
@@ -961,10 +964,6 @@ class BiologicalSimulator:
 ##########################################################################################
 ################## Shape Simulator   (for testing)      ##################################
 ##########################################################################################
-import numpy as np
-from scipy.spatial.transform import Rotation
-from abc import ABC, abstractmethod
-
 class Shape(ABC):
     def __init__(self, position, size, color):
         self.position = np.array(position, dtype=float)
